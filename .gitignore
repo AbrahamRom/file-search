@@ -1,2 +1,4 @@
-app/files
-app/logs
+app/files/*
+!app/files/Readme.md
+app/logs/*
+!app/logs/Readme.md
