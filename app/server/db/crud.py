@@ -1,5 +1,6 @@
-from typing import List
-from db.db import get_conn
+from typing import List, Optional, Set
+
+from .db import get_conn
 
 def upsert_file(
     *,
@@ -30,7 +31,6 @@ def upsert_file(
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(sql, (file_id, name, path, size, last_modified))
-        conn.commit()
 
 def delete_file(*,file_id:str) -> None:
     """Delete a file from Data Base"""
@@ -40,7 +40,34 @@ def delete_file(*,file_id:str) -> None:
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(sql, (file_id,))
-        conn.commit()
+
+
+def list_file_ids() -> Set[str]:
+    """Return the set of file identifiers currently stored in the database."""
+
+    sql = "SELECT file_id FROM files"
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql)
+        rows = cur.fetchall()
+        return {row["file_id"] for row in rows}
+
+
+def get_file(file_id: str) -> Optional[dict]:
+    """Retrieve a single file record by its identifier."""
+
+    sql = """
+    SELECT file_id, name, path, size, last_modified
+    FROM files
+    WHERE file_id = ?
+    """
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, (file_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
 
 def search_files(*, query: str, limit: int = 10, offset: int = 0) -> List[dict]:
     """Search files by name or path using a simple LIKE query."""

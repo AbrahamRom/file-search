@@ -2,3 +2,6 @@ app/files/*
 !app/files/Readme.md
 app/logs/*
 !app/logs/Readme.md
+*.pyc
+__pycache__/
+app/server/db/doc_search.db
