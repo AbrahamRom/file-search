@@ -17,6 +17,7 @@ BaseModel = pydantic.BaseModel
 
 from ..db.crud import delete_file, search_files, upsert_file
 from ..db.db import init_db
+from ..services.scanner import sync
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,8 @@ app = FastAPI(title="File Search API", version="1.0.0")
 @app.on_event("startup")
 async def startup_event():
     init_db()
-    logger.info("Base de datos inicializada correctamente")
+    summary = sync()
+    logger.info("Base de datos inicializada y sincronizada", extra={"sync": summary})
 
 @app.get("/health")
 def health():
@@ -64,11 +66,12 @@ def search_files_endpoint(
 ):
     results = search_files(query=query, limit=limit, offset=offset)
     logger.debug(
-        "Búsqueda ejecutada", extra={
+        "Búsqueda ejecutada",
+        extra={
             "query": query,
             "limit": limit,
             "offset": offset,
             "results": len(results),
-        }
+        },
     )
     return results
