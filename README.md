@@ -28,7 +28,7 @@ app/
 │   ├── app.py           # Interfaz Streamlit
 │   └── ui_components.py # Componentes reutilizables de UI
 ├── files/               # Archivos de ejemplo (montados en runtime)
-└── logs/                # Logs de aplicación y access (montar como volumen)
+└── logs/                # Logs de aplicación y access (persisten en app/logs)
 ```
 
 ## 🚀 Puesta en marcha rápida (Docker)
@@ -47,13 +47,13 @@ docker build -t file-search .
 docker run --rm \
   -p 8000:8000 \
   -p 8501:8501 \
-  -v $(pwd)/logs:/app/logs \
+  -v $(pwd)/app/logs:/app/logs \
   file-search
 ```
 
 - API disponible en `http://localhost:8000` (documentación en `/docs`).
 - UI disponible en `http://localhost:8501`.
-- Los volúmenes son opcionales pero recomendados para persistir los archivos a escanear (`host_files`) y los registros (`logs`).
+- Los volúmenes son opcionales pero recomendados para persistir los archivos a escanear (`app/files`) y los registros (`app/logs`).
 
 > Si solo quieres probar rápidamente, puedes omitir los volúmenes; el contenedor usará los archivos de ejemplo incluidos.
 
@@ -74,15 +74,15 @@ La documentación automática de FastAPI está disponible en `http://localhost:8
 
 - Los logs se guardan en `app/logs/` (archivos `application.log` y `access.log`).
 - Puedes cambiar el directorio y nivel de log con las variables de entorno `LOG_DIR`, `LOG_LEVEL` y `ACCESS_LOG_LEVEL`.
-- Recuerda mapear `./logs:/app/logs` al ejecutar en Docker para persistir los registros.
+- Recuerda mapear `./app/logs:/app/logs` al ejecutar en Docker para persistir los registros.
 
-## �️ Desarrollo local (opcional)
+## Desarrollo local (opcional)
 
 Si prefieres ejecutar la aplicación sin Docker (p. ej. para depuración rápida), bastará con instalar las dependencias y lanzar `app/start.sh`, que replica el comportamiento del contenedor:
 
 ```bash
 pip install -r app/server/requirements.txt
-LOG_DIR=./logs FILES_ROOT=./app/files bash app/start.sh
+FILES_ROOT=./app/files bash app/start.sh
 ```
 
 > No es necesario crear entornos virtuales si vas a trabajar exclusivamente dentro del contenedor.

@@ -1,8 +1,0 @@
-2025-10-11T18:28:02+0000 [INFO] server.logging_config :: Logging configured; writing to /app/logs
-2025-10-11T18:28:02+0000 [INFO] server.services.scanner :: Synchronising 4 files into the database
-2025-10-11T18:28:02+0000 [INFO] server.services.scanner :: Scan complete: discovered=4, upserted=4, deleted=0
-2025-10-11T18:28:02+0000 [INFO] server.api.endpoints :: Base de datos inicializada y sincronizada
-2025-10-11T18:36:23+0000 [INFO] server.logging_config :: Logging configured; writing to /app/logs
-2025-10-11T18:36:24+0000 [INFO] server.services.scanner :: Synchronising 4 files into the database
-2025-10-11T18:36:24+0000 [INFO] server.services.scanner :: Scan complete: discovered=4, upserted=4, deleted=0
-2025-10-11T18:36:24+0000 [INFO] server.api.endpoints :: Base de datos inicializada y sincronizada

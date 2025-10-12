@@ -44,4 +44,4 @@ if __name__ == "__main__":
 
     host, port = _get_server_runtime_config()
 
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host=host, port=port, log_config=None)

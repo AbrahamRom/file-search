@@ -13,6 +13,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - dev convenience
 
 FastAPI = fastapi.FastAPI
 Query = fastapi.Query
+Request = fastapi.Request
 BaseModel = pydantic.BaseModel
 
 from ..db.crud import delete_file, search_files, upsert_file
@@ -20,6 +21,7 @@ from ..db.db import init_db
 from ..services.scanner import sync
 
 logger = logging.getLogger(__name__)
+access_logger = logging.getLogger("app.access")
 
 app = FastAPI(title="File Search API", version="1.0.0")
 
@@ -60,18 +62,24 @@ def delete_file_endpoint(file_id: str):
 
 @app.get("/search", response_model=List[FileIn])
 def search_files_endpoint(
+    request: Request,
     query: str = Query(..., min_length=1),
     limit: int = Query(10, ge=1, le=100),
     offset: int = Query(0, ge=0)
 ):
     results = search_files(query=query, limit=limit, offset=offset)
-    logger.debug(
-        "Búsqueda ejecutada",
-        extra={
-            "query": query,
-            "limit": limit,
-            "offset": offset,
-            "results": len(results),
-        },
+    logger.info(
+        "Búsqueda query='%s' -> %d resultados (limit=%d, offset=%d)",
+        query,
+        len(results),
+        limit,
+        offset,
     )
+    client_host = request.client.host if request.client else "-"
+    access_message = (
+        f"{client_host} {request.method} {request.url.path} "
+        f"query='{query}' -> {len(results)} resultados "
+        f"(limit={limit}, offset={offset})"
+    )
+    access_logger.info(access_message)
     return results

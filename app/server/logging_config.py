@@ -8,9 +8,27 @@ from logging.config import dictConfig
 from pathlib import Path
 from typing import Optional
 
-DEFAULT_LOG_DIR = Path(
-    os.getenv("LOG_DIR", Path(__file__).resolve().parents[1] / "logs")
-)
+_APP_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _resolve_log_dir(raw_value: Optional[Path | str]) -> Path:
+    """Return an absolute path for the log directory.
+
+    Relative paths are resolved from the application root so settings work both
+    inside the container (``/app``) and when running from the repository.
+    """
+
+    if raw_value in (None, ""):
+        return _APP_ROOT / "logs"
+
+    candidate = Path(raw_value)
+    if not candidate.is_absolute():
+        candidate = (_APP_ROOT / candidate).resolve()
+
+    return candidate
+
+
+DEFAULT_LOG_DIR = _resolve_log_dir(os.getenv("LOG_DIR"))
 DEFAULT_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 DEFAULT_ACCESS_LOG_LEVEL = os.getenv("ACCESS_LOG_LEVEL", "INFO")
 
@@ -23,7 +41,7 @@ def configure_logging(
 ) -> Path:
     """Configure logging for the application and return the resolved log directory."""
 
-    target_dir = Path(log_dir) if log_dir else DEFAULT_LOG_DIR
+    target_dir = _resolve_log_dir(log_dir) if log_dir else DEFAULT_LOG_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
 
     app_log_path = target_dir / "application.log"
@@ -72,6 +90,11 @@ def configure_logging(
                 "": {
                     "handlers": ["console", "file"],
                     "level": level or DEFAULT_LOG_LEVEL,
+                    "propagate": False,
+                },
+                "app.access": {
+                    "handlers": ["console", "access_file"],
+                    "level": access_level or DEFAULT_ACCESS_LOG_LEVEL,
                     "propagate": False,
                 },
                 "uvicorn": {
