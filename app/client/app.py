@@ -21,7 +21,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - ayuda en entornos incom
 
 st = streamlit
 
-from ui_components import (
+from client.ui_components import (
 	pagination_controls,
 	render_results,
 	search_form,
