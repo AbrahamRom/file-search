@@ -21,7 +21,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - ayuda en entornos incom
 
 st = streamlit
 
-from client.ui_components import (
+from ui_components import (
 	pagination_controls,
 	render_results,
 	search_form,
@@ -29,6 +29,7 @@ from client.ui_components import (
 	show_error,
 	show_warning,
 )
+
 
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
