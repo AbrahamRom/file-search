@@ -5,3 +5,4 @@ app/logs/*
 *.pyc
 __pycache__/
 app/server/db/doc_search.db
+.env/
