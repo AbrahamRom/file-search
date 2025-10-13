@@ -14,11 +14,14 @@ except ModuleNotFoundError as exc:  # pragma: no cover - dev convenience
 FastAPI = fastapi.FastAPI
 Query = fastapi.Query
 Request = fastapi.Request
+HTTPException = fastapi.HTTPException
+FileResponse = fastapi.responses.FileResponse
 BaseModel = pydantic.BaseModel
 
 from ..db.crud import delete_file, search_files, upsert_file
 from ..db.db import init_db
 from ..services.scanner import sync
+from ..services import file_handler
 
 logger = logging.getLogger(__name__)
 access_logger = logging.getLogger("app.access")
@@ -59,6 +62,33 @@ def delete_file_endpoint(file_id: str):
     delete_file(file_id=file_id)
     logger.info("Archivo %s eliminado", file_id)
     return {"status": "file deleted"}
+
+
+@app.get("/files/{file_id}/download")
+def download_file_endpoint(file_id: str, request: Request):
+    try:
+        target = file_handler.resolve_download(file_id)
+    except file_handler.FileRecordNotFoundError:
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    except file_handler.FileOnDiskNotFoundError:
+        raise HTTPException(status_code=404, detail="Archivo no disponible en disco")
+
+    logger.info("Descarga solicitada para archivo %s", file_id)
+
+    client_host = request.client.host if request.client else "-"
+    access_logger.info(
+        "%s %s %s -> descarga '%s'",
+        client_host,
+        request.method,
+        request.url.path,
+        target.filename,
+    )
+
+    return FileResponse(
+        path=target.path,
+        filename=target.filename,
+        media_type=target.media_type,
+    )
 
 @app.get("/search", response_model=List[FileIn])
 def search_files_endpoint(
