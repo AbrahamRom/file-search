@@ -1,0 +1,26 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "8000:8000"
+    environment:
+      - FILES_ROOT=${FILES_ROOT:-/app/files}
+      - LOG_DIR=/app/logs
+    volumes:
+      - ${FILES_SOURCE:-./runtime/files}:/app/files
+      - ./runtime/logs:/app/logs
+    restart: unless-stopped
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    depends_on:
+      - server
+    environment:
+      - API_BASE_URL=http://server:8000
+    ports:
+      - "8501:8501"
+    restart: unless-stopped

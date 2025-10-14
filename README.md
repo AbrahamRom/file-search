@@ -33,34 +33,39 @@ app/
 
 ## 🚀 Puesta en marcha rápida (Docker)
 
-### Backend (FastAPI)
-
-```bash
-# 1. Construye la imagen del servidor
 docker build -f Dockerfile.server -t file-search-api .
-
-# 2. Arranca la API montando los directorios que quieras compartir/persistir
-mkdir -p runtime/files runtime/logs
-
 docker run --rm -p 8000:8000 -v "${PWD}/runtime/files:/app/files" -v "${PWD}/runtime/logs:/app/logs" file-search-api
-```
+docker build -f Dockerfile.client -t file-search-client .
+docker run --rm -p 8501:8501 -e API_BASE_URL=http://host.docker.internal:8000 file-search-client
 
-- API disponible en `http://localhost:8000` (documentación en `/docs`).
-- Si ya tienes los archivos en otra ruta, reemplaza `$(pwd)/runtime/files` por la carpeta que desees compartir.
-- Puedes ajustar los puertos o añadir variables de entorno (`FILES_ROOT`, `LOG_DIR`, `DB_PATH`, etc.) según tus necesidades.
+### Puesta en marcha con Docker Compose
 
-### Cliente (Streamlit)
+Puedes inicializar ambos servicios y definir la ruta de los archivos a indexar usando variables de entorno:
 
 ```bash
-# 1. Construye la imagen del cliente
-docker build -f Dockerfile.client -t file-search-client .
+# 1. Elige la carpeta de archivos que deseas compartir (por ejemplo /home/usuario/documentos)
+export FILES_SOURCE=/home/usuario/documentos
 
-# 2. Arranca la UI apuntando a la URL de la API
-docker run --rm -p 8501:8501 -e API_BASE_URL=http://host.docker.internal:8000 file-search-client
+# 2. (Opcional) Cambia la ruta interna del contenedor donde se indexarán los archivos
+export FILES_ROOT=/app/files
+
+# 3. Inicia ambos servicios
+docker compose up --build
 ```
 
-- Ajusta `API_BASE_URL` para que apunte al servicio FastAPI accesible desde el contenedor (por ejemplo `http://file-search-api:8000` en Swarm o Compose).
-- La interfaz estará disponible en `http://localhost:8501`.
+Por defecto, si no defines `FILES_SOURCE`, se usará `./runtime/files`.
+
+- La API estará disponible en `http://localhost:8000` (documentación en `/docs`).
+- El cliente Streamlit estará en `http://localhost:8501`.
+- Puedes ajustar `API_BASE_URL` en el cliente si la API está en otra dirección.
+
+Ejemplo para cambiar la carpeta de archivos:
+
+```bash
+FILES_SOURCE=/home/usuario/documentos docker compose up --build
+```
+
+Esto montará `/home/usuario/documentos` en el contenedor y la API indexará esos archivos.
 
 ## 🧾 Endpoints principales
 
