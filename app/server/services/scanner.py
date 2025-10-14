@@ -14,13 +14,16 @@ from ..db import crud
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_ROOT = Path(
-	os.getenv(
-		"FILES_ROOT",
-		# ../../files relative to this module (services → server → app)
-		Path(__file__).resolve().parents[2] / "files",
-	)
-)
+_env_root = os.getenv("FILES_ROOT")
+_volume_root = Path("/app/files")
+_fallback_root = Path(__file__).resolve().parents[2] / "files"
+
+if _env_root:
+	_DEFAULT_ROOT = Path(_env_root)
+elif _volume_root.exists():
+	_DEFAULT_ROOT = _volume_root
+else:
+	_DEFAULT_ROOT = _fallback_root
 
 
 @dataclass(frozen=True)

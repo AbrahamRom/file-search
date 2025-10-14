@@ -1,14 +1,14 @@
 # File Search
 
-Plataforma compuesta por un backend FastAPI y un cliente web en Streamlit para localizar, filtrar y descargar archivos dentro de un directorio montado en el contenedor.
+Plataforma compuesta por un backend FastAPI y un cliente web en Streamlit para localizar, filtrar y descargar archivos alojados en un volumen compartido.
 
 ## 🎯 Características principales
 
-- Escaneo recurrente de `app/files/` con sincronización automática en SQLite.
-- API REST con endpoints de salud, búsqueda paginada, consulta y descarga.
-- Cliente Streamlit con búsqueda por nombre, filtro por tipo de archivo, paginación y enlaces de descarga.
-- Sistema de logging unificado (aplicación y access logs) escribiendo en `app/logs/`.
-- Imagen Docker lista para levantar API y cliente en un solo contenedor.
+- Escaneo recurrente del directorio configurado (por defecto `/app/files`) con sincronización automática en SQLite.
+- API REST con endpoints de salud, búsqueda paginada, consulta y descarga de archivos.
+- Cliente Streamlit con búsqueda por nombre, filtro por tipo, paginación y enlaces de descarga.
+- Sistema de logging unificado (aplicación y access logs) escribiendo en `/app/logs`.
+- Imágenes Docker separadas para la API (`Dockerfile.server`) y el cliente (`Dockerfile.client`) listas para ejecutarse en redes Swarm o entornos distribuidos.
 
 ## 📂 Estructura relevante
 
@@ -27,35 +27,40 @@ app/
 ├── client/
 │   ├── app.py           # Interfaz Streamlit
 │   └── ui_components.py # Componentes reutilizables de UI
-├── files/               # Archivos de ejemplo (montados en runtime)
-└── logs/                # Logs de aplicación y access (persisten en app/logs)
+├── files/               # Ejemplos para pruebas locales (monta tu propio volumen en producción)
+└── logs/                # Carpeta objetivo para logs (se recomienda montarla como volumen)
 ```
 
 ## 🚀 Puesta en marcha rápida (Docker)
 
-El contenedor se encarga de instalar dependencias, inicializar la base de datos, escanear los archivos y lanzar tanto la API (FastAPI) como la UI (Streamlit).
+### Backend (FastAPI)
 
 ```bash
-# 1. Clona el repositorio y accede a la carpeta raíz
-git clone <repo>
-cd file-search
+# 1. Construye la imagen del servidor
+docker build -f Dockerfile.server -t file-search-api .
 
-# 2. Construye la imagen
-docker build -t file-search .
+# 2. Arranca la API montando los directorios que quieras compartir/persistir
+mkdir -p runtime/files runtime/logs
 
-# 3. Ejecuta el contenedor (puertos 8000 y 8501)
-docker run --rm \
-  -p 8000:8000 \
-  -p 8501:8501 \
-  -v $(pwd)/app/logs:/app/logs \
-  file-search
+docker run --rm -p 8000:8000 -v "${PWD}/runtime/files:/app/files" -v "${PWD}/runtime/logs:/app/logs" file-search-api
 ```
 
 - API disponible en `http://localhost:8000` (documentación en `/docs`).
-- UI disponible en `http://localhost:8501`.
-- Los volúmenes son opcionales pero recomendados para persistir los archivos a escanear (`app/files`) y los registros (`app/logs`).
+- Si ya tienes los archivos en otra ruta, reemplaza `$(pwd)/runtime/files` por la carpeta que desees compartir.
+- Puedes ajustar los puertos o añadir variables de entorno (`FILES_ROOT`, `LOG_DIR`, `DB_PATH`, etc.) según tus necesidades.
 
-> Si solo quieres probar rápidamente, puedes omitir los volúmenes; el contenedor usará los archivos de ejemplo incluidos.
+### Cliente (Streamlit)
+
+```bash
+# 1. Construye la imagen del cliente
+docker build -f Dockerfile.client -t file-search-client .
+
+# 2. Arranca la UI apuntando a la URL de la API
+docker run --rm -p 8501:8501 -e API_BASE_URL=http://host.docker.internal:8000 file-search-client
+```
+
+- Ajusta `API_BASE_URL` para que apunte al servicio FastAPI accesible desde el contenedor (por ejemplo `http://file-search-api:8000` en Swarm o Compose).
+- La interfaz estará disponible en `http://localhost:8501`.
 
 ## 🧾 Endpoints principales
 
@@ -68,24 +73,22 @@ docker run --rm \
 | POST   | `/files`                     | Registra o actualiza un archivo.          |
 | DELETE | `/files/{file_id}`           | Elimina un registro existente.            |
 
-La documentación automática de FastAPI está disponible en `http://localhost:8000/docs`.
+La documentación automática de FastAPI está disponible en `http://API_HOST:8000/docs`.
 
 ## 🗃️ Logging
 
-- Los logs se guardan en `app/logs/` (archivos `application.log` y `access.log`).
-- Puedes cambiar el directorio y nivel de log con las variables de entorno `LOG_DIR`, `LOG_LEVEL` y `ACCESS_LOG_LEVEL`.
-- Recuerda mapear `./app/logs:/app/logs` al ejecutar en Docker para persistir los registros.
+- Los logs se guardan en `/app/logs` (`application.log` y `access.log`).
+- Cambia el destino o niveles con `LOG_DIR`, `LOG_LEVEL` y `ACCESS_LOG_LEVEL`.
+- Monta un volumen en `/app/logs` para persistirlos en producción.
 
 ## Desarrollo local (opcional)
-
-Si prefieres ejecutar la aplicación sin Docker (p. ej. para depuración rápida), bastará con instalar las dependencias y lanzar `app/start.sh`, que replica el comportamiento del contenedor:
 
 ```bash
 pip install -r app/server/requirements.txt
 FILES_ROOT=./app/files bash app/start.sh
 ```
 
-> No es necesario crear entornos virtuales si vas a trabajar exclusivamente dentro del contenedor.
+El directorio `app/files` del repositorio contiene ejemplos para pruebas locales rápidas; en entornos reales apunta `FILES_ROOT` a la ruta que quieras indexar.
 
 ## 🧪 Pruebas rápidas
 
@@ -101,7 +104,8 @@ PYTHONPATH=$(pwd) python3 -c "from fastapi.testclient import TestClient; from ap
 
 ## 📌 Notas adicionales
 
-- Personaliza la carpeta `app/files/` con tus documentos. Al reconstruir la imagen, puedes copiar archivos de ejemplo o montarlos como volumen en runtime.
-- El escaneo utiliza la ruta `FILES_ROOT` (por defecto `app/files/`). Define esta variable si deseas apuntar a otra carpeta dentro del contenedor.
+- Al construir la imagen del servidor no se empaquetan archivos de datos; monta la carpeta deseada en `/app/files` en runtime.
+- Para despliegues en Swarm o Kubernetes declara volúmenes/claims para `/app/files` y `/app/logs`, y expone la variable `API_BASE_URL` en el cliente para alcanzar la API.
+- Ajusta `DB_PATH` si quieres que la base SQLite viva fuera del contenedor.
 
 ---

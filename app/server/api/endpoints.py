@@ -18,7 +18,7 @@ HTTPException = fastapi.HTTPException
 FileResponse = fastapi.responses.FileResponse
 BaseModel = pydantic.BaseModel
 
-from ..db.crud import delete_file, search_files, upsert_file
+from ..db.crud import delete_file, list_files, search_files, upsert_file
 from ..db.db import init_db
 from ..services.scanner import sync
 from ..services import file_handler
@@ -62,6 +62,19 @@ def delete_file_endpoint(file_id: str):
     delete_file(file_id=file_id)
     logger.info("Archivo %s eliminado", file_id)
     return {"status": "file deleted"}
+
+
+@app.get("/files", response_model=List[FileIn])
+def list_files_endpoint(request: Request):
+    results = list_files()
+    logger.info("Listando %d archivos", len(results))
+
+    client_host = request.client.host if request.client else "-"
+    access_message = (
+        f"{client_host} {request.method} {request.url.path} -> {len(results)} archivos"
+    )
+    access_logger.info(access_message)
+    return results
 
 
 @app.get("/files/{file_id}/download")
