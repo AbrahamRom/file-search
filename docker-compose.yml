@@ -21,6 +21,7 @@ services:
       - server
     environment:
       - API_BASE_URL=http://server:8000
+      - BROWSER_API_URL=http://localhost:8000
     ports:
       - "8501:8501"
     restart: unless-stopped

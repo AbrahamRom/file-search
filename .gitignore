@@ -6,5 +6,7 @@ app/logs/*
 __pycache__/
 app/server/db/doc_search.db
 .env/
+env
 runtime/logs/access.log
 runtime/logs/application.log
+.bash

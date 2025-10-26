@@ -1,7 +1,10 @@
 import importlib
 import logging
+import os
+import shutil
 from datetime import datetime
 from typing import List, Optional
+from pathlib import Path
 
 try:
     fastapi = importlib.import_module("fastapi")
@@ -17,10 +20,13 @@ Request = fastapi.Request
 HTTPException = fastapi.HTTPException
 FileResponse = fastapi.responses.FileResponse
 BaseModel = pydantic.BaseModel
+UploadFile = fastapi.UploadFile
+File = fastapi.File
+Form = fastapi.Form
 
 from ..db.crud import delete_file, list_files, search_files, upsert_file
 from ..db.db import init_db
-from ..services.scanner import sync
+from ..services.scanner import sync, _DEFAULT_ROOT, _compute_file_id
 from ..services import file_handler
 
 logger = logging.getLogger(__name__)
@@ -75,6 +81,62 @@ def list_files_endpoint(request: Request):
     )
     access_logger.info(access_message)
     return results
+
+@app.post("/upload")
+async def upload_file_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+    folder: str = Form(None)
+):
+    """
+    Sube un archivo a la carpeta files y lo registra en la base de datos.
+    Si se especifica una carpeta, el archivo se guardará en esa subcarpeta.
+    """
+    try:
+        # Crear la ruta de destino
+        target_dir = _DEFAULT_ROOT
+        if folder:
+            target_dir = target_dir / folder
+            os.makedirs(target_dir, exist_ok=True)
+        
+        # Guardar el archivo
+        file_path = target_dir / file.filename
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Obtener metadatos del archivo
+        stat = file_path.stat()
+        last_modified = datetime.fromtimestamp(stat.st_mtime)
+        
+        # Calcular el ID del archivo basado en su ruta relativa
+        relative_path = file_path.relative_to(_DEFAULT_ROOT).as_posix()
+        file_id = _compute_file_id(relative_path)
+        
+        # Registrar el archivo en la base de datos
+        upsert_file(
+            file_id=file_id,
+            name=file.filename,
+            path=str(file_path.resolve()),
+            size=stat.st_size,
+            last_modified=last_modified,
+        )
+        
+        logger.info("Archivo %s subido y registrado correctamente", file.filename)
+        
+        # Registrar acceso
+        client_host = request.client.host if request.client else "-"
+        access_message = f"{client_host} {request.method} {request.url.path} -> archivo '{file.filename}' subido"
+        access_logger.info(access_message)
+        
+        return {
+            "status": "success",
+            "file_id": file_id,
+            "filename": file.filename,
+            "size": stat.st_size
+        }
+    except Exception as e:
+        logger.error("Error al subir archivo: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error al subir archivo: {str(e)}")
 
 
 @app.get("/files/{file_id}/download")

@@ -34,8 +34,11 @@ app/
 ## 🚀 Puesta en marcha rápida (Docker)
 
 docker build -f Dockerfile.server -t file-search-api .
+
 docker run --rm -p 8000:8000 -v "${PWD}/runtime/files:/app/files" -v "${PWD}/runtime/logs:/app/logs" file-search-api
+
 docker build -f Dockerfile.client -t file-search-client .
+
 docker run --rm -p 8501:8501 -e API_BASE_URL=http://host.docker.internal:8000 file-search-client
 
 ### Puesta en marcha con Docker Compose
@@ -48,6 +51,51 @@ export FILES_SOURCE=/home/usuario/documentos
 
 # 2. (Opcional) Cambia la ruta interna del contenedor donde se indexarán los archivos
 export FILES_ROOT=/app/files
+
+# 3. Inicia ambos servicios
+docker compose up --build
+```
+
+---
+
+## Funcionalidad de Archivos
+
+El proyecto incluye una funcionalidad para usar una carpeta de archivos como base de datos:
+
+- La carpeta `files` se utiliza para almacenar los archivos subidos
+- Los archivos se cargan automáticamente y se registran en la base de datos
+- Se puede acceder a los archivos a través de la API
+
+### Cómo subir archivos
+
+Para subir un archivo, utiliza el endpoint `/upload`:
+
+```
+POST /upload
+```
+
+Parámetros:
+- `file`: El archivo a subir (multipart/form-data)
+- `folder`: (Opcional) Subcarpeta donde guardar el archivo
+
+Ejemplo de respuesta:
+```json
+{
+  "status": "success",
+  "file_id": "7f8e9d1c2b3a4f5e6d7c8b9a",
+  "filename": "documento.pdf",
+  "size": 12345
+}
+```
+
+Los archivos subidos estarán disponibles para búsqueda y descarga a través de los endpoints existentes.
+
+```bash
+# 1. Elige la carpeta de archivos que deseas compartir (por ejemplo D:\MisDocumentos)
+$env:FILES_SOURCE = "D:\Library"
+
+# 2. (Opcional) Cambia la ruta interna del contenedor donde se indexarán los archivos
+$env:FILES_ROOT = "/app/files"
 
 # 3. Inicia ambos servicios
 docker compose up --build

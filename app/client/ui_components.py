@@ -31,6 +31,7 @@ def search_form(
 	file_types: Iterable[str],
 	default_file_type: str,
 	default_limit: int,
+	on_submit=None,
 	limit_options: Iterable[int] = (10, 20, 50),
 ) -> tuple[str, str, int, bool]:
 	"""Renderiza el formulario de búsqueda y devuelve los valores introducidos."""
@@ -38,31 +39,39 @@ def search_form(
 	options = list(file_types)
 	limits = list(limit_options)
 
-	with st.form("search_form"):
-		query = st.text_input(
+	with st.form("search_form", clear_on_submit=False):
+		st.text_input(
 			"Buscar por nombre o ruta",
 			value=default_query,
 			placeholder="Ej. reporte",
+			key="search_query"
 		)
 		col_type, col_limit = st.columns([2, 1])
 		with col_type:
-			type_choice = st.selectbox(
+			st.selectbox(
 				"Tipo de archivo",
 				options=options,
 				index=max(0, options.index(default_file_type))
 				if default_file_type in options
 				else 0,
+				key="search_type"
 			)
 		with col_limit:
-			limit_choice = st.selectbox(
+			st.selectbox(
 				"Resultados por página",
 				options=limits,
 				index=limits.index(default_limit)
 				if default_limit in limits
 				else 0,
+				key="search_limit"
 			)
 
-		submitted = st.form_submit_button("Buscar")
+		submitted = st.form_submit_button("Buscar", on_click=on_submit if on_submit else None)
+
+	# Para mantener compatibilidad con el código existente
+	query = st.session_state.get("search_query", default_query)
+	type_choice = st.session_state.get("search_type", default_file_type)
+	limit_choice = st.session_state.get("search_limit", default_limit)
 
 	return query, type_choice, limit_choice, submitted
 

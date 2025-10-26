@@ -21,14 +21,25 @@ except ModuleNotFoundError as exc:  # pragma: no cover - ayuda en entornos incom
 
 st = streamlit
 
-from client.ui_components import (
-	pagination_controls,
-	render_results,
-	search_form,
-	setup_page,
-	show_error,
-	show_warning,
-)
+try:
+	from client.ui_components import (
+		pagination_controls,
+		render_results,
+		search_form,
+		setup_page,
+		show_error,
+		show_warning,
+	)
+except ModuleNotFoundError:
+	# Importación relativa cuando se ejecuta directamente desde la carpeta client
+	from ui_components import (
+		pagination_controls,
+		render_results,
+		search_form,
+		setup_page,
+		show_error,
+		show_warning,
+	)
 
 
 
@@ -38,7 +49,14 @@ DEFAULT_TYPE = "Todos"
 
 
 def api_url(path: str) -> str:
+	"""Construye una URL para la API interna."""
 	return urljoin(API_BASE_URL.rstrip("/") + "/", path.lstrip("/"))
+
+def build_download_url(record: Dict) -> str:
+	"""Construye la URL de descarga para el navegador del usuario."""
+	# Usamos la URL del navegador (no la interna de Docker)
+	browser_url = os.getenv("BROWSER_API_URL", API_BASE_URL)
+	return urljoin(browser_url.rstrip("/") + "/", f"files/{record['file_id']}/download")
 
 
 @st.cache_data(ttl=10)
@@ -80,22 +98,33 @@ def ensure_state_defaults() -> None:
 	st.session_state.setdefault("available_types", [DEFAULT_TYPE])
 
 
+def on_search_submit():
+	"""Callback que se ejecuta cuando se envía el formulario de búsqueda."""
+	# Actualizar el estado con los valores del formulario
+	st.session_state.query = st.session_state.search_query.strip()
+	st.session_state.file_type = st.session_state.search_type
+	st.session_state.limit = st.session_state.search_limit
+	st.session_state.page = 0
+
 def main() -> None:
 	ensure_state_defaults()
 	setup_page()
+	
+	# Inicializar valores del formulario desde el estado de la sesión
+	if "search_query" not in st.session_state:
+		st.session_state.search_query = st.session_state.query
+	if "search_type" not in st.session_state:
+		st.session_state.search_type = st.session_state.file_type
+	if "search_limit" not in st.session_state:
+		st.session_state.search_limit = st.session_state.limit
 
 	query, type_choice, limit_choice, submitted = search_form(
-		default_query=st.session_state.query,
+		default_query=st.session_state.search_query,
 		file_types=st.session_state.available_types,
-		default_file_type=st.session_state.file_type,
-		default_limit=st.session_state.limit,
+		default_file_type=st.session_state.search_type,
+		default_limit=st.session_state.search_limit,
+		on_submit=on_search_submit,
 	)
-
-	if submitted:
-		st.session_state.query = query.strip()
-		st.session_state.file_type = type_choice
-		st.session_state.limit = limit_choice
-		st.session_state.page = 0
 
 	if not st.session_state.query:
 		show_warning("Introduce un término de búsqueda para comenzar.")
@@ -130,9 +159,7 @@ def main() -> None:
 
 	render_results(
 		filtered_records,
-		build_download_url=lambda record: api_url(
-			f"files/{record['file_id']}/download"
-		),
+		build_download_url=build_download_url,
 		timezone_label="local",
 	)
 
