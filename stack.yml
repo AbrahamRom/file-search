@@ -1,0 +1,47 @@
+version: "3.9"
+
+services:
+  server:
+    image: file-search-api:latest
+    environment:
+      - FILES_ROOT=${FILES_ROOT:-/app/files}
+      - LOG_DIR=/app/logs
+    volumes:
+      - type: bind
+        source: ${FILES_SOURCE:-/srv/file-search/files}
+        target: /app/files
+      - type: bind
+        source: ${LOGS_SOURCE:-/srv/file-search/logs}
+        target: /app/logs
+    networks:
+      - file_search_net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+
+  client:
+    image: file-search-client:latest
+    environment:
+      - API_BASE_URL=http://server:8000
+    networks:
+      - file_search_net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == worker
+    ports:
+      - target: 8501
+        published: 8501
+        mode: ingress
+
+networks:
+  file_search_net:
+    driver: overlay
+    attachable: true
