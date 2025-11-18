@@ -22,11 +22,16 @@ services:
       placement:
         constraints:
           - node.role == manager
+    ports:
+      - target: 8000
+        published: 8000
+        mode: ingress
 
   client:
     image: file-search-client:latest
     environment:
       - API_BASE_URL=http://server:8000
+      - BROWSER_API_URL=${BROWSER_API_URL:-http://localhost:8000}
     networks:
       - file_search_net
     deploy:
