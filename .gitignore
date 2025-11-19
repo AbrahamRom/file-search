@@ -1,12 +1,10 @@
-app/files/*
-!app/files/Readme.md
-app/logs/*
-!app/logs/Readme.md
+runtime/files/*
+!runtime/files/Readme.md
+runtime/logs/*
+!runtime/logs/Readme.md
 *.pyc
 __pycache__/
 app/server/db/doc_search.db
 .env/
 env
-runtime/logs/access.log
-runtime/logs/application.log
 .bash

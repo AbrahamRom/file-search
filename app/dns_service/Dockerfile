@@ -2,24 +2,21 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1
 
-WORKDIR /app
+# Cambiamos el WORKDIR a la raíz del sistema de archivos para que /app sea un módulo importable
+WORKDIR /
 
-# Instalar dependencias
 COPY app/dns_service/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
+RUN pip install --no-cache-dir --default-timeout=1000 -r /tmp/requirements.txt && rm /tmp/requirements.txt
 
-# Copiar estructura de paquetes necesaria
-# Necesitamos __init__.py para que app sea un paquete
+# Copiamos la estructura manteniendo la carpeta 'app'
 COPY app/__init__.py /app/__init__.py
 COPY app/dns_service /app/dns_service
 
-# Crear directorio de logs
 RUN mkdir -p /app/logs
 ENV LOG_DIR=/app/logs
-ENV PYTHONPATH=/app
+# Añadimos / (root) al PYTHONPATH para que 'import app.dns_service' funcione
+ENV PYTHONPATH=/
 
-# Puerto solicitado
 EXPOSE 5353
 
-# Ejecutar uvicorn apuntando al módulo dentro del paquete app
 CMD ["uvicorn", "app.dns_service.main:app", "--host", "0.0.0.0", "--port", "5353"]

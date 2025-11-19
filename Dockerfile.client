@@ -5,10 +5,10 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 COPY app/client/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
+# FIX: Agregamos --default-timeout=1000 para evitar errores de red
+RUN pip install --no-cache-dir --default-timeout=10000 -r /tmp/requirements.txt && rm /tmp/requirements.txt
 
 COPY app/__init__.py /app/__init__.py
-# Copiamos la librería común y el servicio DNS (por si se necesita referencia, aunque basta con common)
 COPY app/common /app/common
 COPY app/client /app/client
 
