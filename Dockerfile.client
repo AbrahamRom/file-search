@@ -8,10 +8,14 @@ COPY app/client/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
 
 COPY app/__init__.py /app/__init__.py
+# Copiamos la librería común y el servicio DNS (por si se necesita referencia, aunque basta con common)
+COPY app/common /app/common
 COPY app/client /app/client
 
 ENV PYTHONPATH=/app \
-    API_BASE_URL=http://server:8000
+    DNS_SERVICE_HOST=dns_service \
+    TARGET_SERVICE_NAME=server \
+    TARGET_SERVICE_PORT=8000
 
 EXPOSE 8501
 
