@@ -1,11 +1,34 @@
 version: "3.9"
 
 services:
+  dns_service:
+    image: file-search-dns:latest
+    environment:
+      - LOG_DIR=/app/logs
+    volumes:
+      - type: bind
+        source: ${LOGS_SOURCE:-/srv/file-search/logs}
+        target: /app/logs
+    networks:
+      - file_search_net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+    ports:
+      - target: 5353
+        published: 5353
+        mode: ingress
+
   server:
     image: file-search-api:latest
     environment:
       - FILES_ROOT=${FILES_ROOT:-/app/files}
       - LOG_DIR=/app/logs
+      - DNS_SERVICE_HOST=dns_service
     volumes:
       - type: bind
         source: ${FILES_SOURCE:-/srv/file-search/files}
@@ -30,6 +53,9 @@ services:
   client:
     image: file-search-client:latest
     environment:
+      - DNS_SERVICE_HOST=dns_service
+      - TARGET_SERVICE_NAME=server
+      - TARGET_SERVICE_PORT=8000
       - API_BASE_URL=http://server:8000
       - BROWSER_API_URL=${BROWSER_API_URL:-http://localhost:8000}
     networks:
