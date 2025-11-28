@@ -1,111 +1,408 @@
 """
-Módulo común para la resolución de nombres de servicio mediante el DNS Service personalizado.
+Módulo común para la resolución de nombres de servicio mediante el DNS Service HA.
+Implementa descubrimiento dinámico y failover automático entre múltiples servidores DNS.
 """
 import logging
 import socket
 import time
 import os
-from typing import Dict, Optional, Any
+import threading
+from typing import Dict, Optional, Any, List
 
-# Intentamos importar requests, si falla es porque falta en el entorno
 try:
     import requests
 except ImportError:
     requests = None
 
-# Configuración del logger para este módulo
-# Heredará la configuración del proceso padre (Server o Client)
 logger = logging.getLogger(__name__)
 
-class DNSClient:
+
+class DNSClientHA:
     """
-    Cliente para interactuar con el servicio DNS personalizado.
-    Mantiene un caché local y realiza el bootstrap inicial.
+    Cliente DNS con Alta Disponibilidad y Descubrimiento Dinámico.
+    
+    - Usa alias DNS de Docker para descubrir servidores
+    - Obtiene lista de servidores DNS dinámicamente
+    - Failover automático entre servidores
+    - Cache local con TTL
+    - Actualización periódica de lista de servidores
     """
     
-    def __init__(self, dns_host: str = "dns_service", dns_port: int = 5353):
+    def __init__(
+        self, 
+        dns_alias: str = "dns",
+        dns_port: int = 5353
+    ):
         if requests is None:
-            raise ImportError("La librería 'requests' es necesaria para usar DNSClient. Instálala con pip install requests.")
-            
-        self.dns_host = dns_host
+            raise ImportError("La librería 'requests' es necesaria. Instálala con: pip install requests")
+        
+        self.dns_alias = dns_alias
         self.dns_port = dns_port
-        self.dns_ip: Optional[str] = None
+        
+        # Lista de servidores DNS descubiertos
+        # [{ip, url, server_id, role, healthy, primary_since}, ...]
+        self._dns_servers: List[Dict] = []
+        
+        # URL del primario actual
+        self._primary_url: Optional[str] = None
+        
+        # Cache de resoluciones
         self._cache: Dict[str, Dict[str, Any]] = {}
         
-        # Intentar localizar el DNS service al iniciar
+        # Lock para thread-safety
+        self._lock = threading.Lock()
+        
+        # Estado del cliente
+        self._bootstrapped = False
+        self._last_server_refresh = 0
+        self._server_refresh_interval = 30  # Refrescar lista cada 30 segundos
+        
+        # Bootstrap inicial
         self._bootstrap()
-
+    
     def _bootstrap(self) -> None:
         """
-        Localiza la IP del contenedor DNS usando el resolver nativo de Docker.
+        Inicializa el cliente DNS:
+        1. Descubre servidores DNS usando el alias de Docker
+        2. Obtiene la lista completa de servidores del primero que responda
+        """
+        logger.info(f"[DNSClientHA] Iniciando bootstrap con alias '{self.dns_alias}'...")
+        
+        # Descubrir IPs via alias DNS de Docker
+        discovered_ips = self._discover_via_alias()
+        
+        if not discovered_ips:
+            logger.warning(f"[DNSClientHA] No se encontraron servidores DNS via alias '{self.dns_alias}'")
+            self._bootstrapped = False
+            return
+        
+        logger.info(f"[DNSClientHA] IPs descubiertas: {discovered_ips}")
+        
+        # Intentar obtener la lista completa de un servidor
+        for ip in discovered_ips:
+            if self._fetch_server_list(ip):
+                self._bootstrapped = True
+                logger.info(f"[DNSClientHA] Bootstrap exitoso. {len(self._dns_servers)} servidores conocidos")
+                return
+        
+        # Si no pudimos obtener la lista, usar las IPs descubiertas directamente
+        logger.warning("[DNSClientHA] No se pudo obtener lista de servidores. Usando IPs descubiertas directamente.")
+        with self._lock:
+            self._dns_servers = [
+                {
+                    "ip": ip,
+                    "url": f"http://{ip}:{self.dns_port}",
+                    "server_id": f"dns_{ip}",
+                    "role": "unknown",
+                    "healthy": True,
+                    "primary_since": None
+                }
+                for ip in discovered_ips
+            ]
+        self._bootstrapped = True
+    
+    def _discover_via_alias(self) -> List[str]:
+        """
+        Descubre servidores DNS usando el alias compartido de Docker DNS.
+        Docker DNS retorna todas las IPs que comparten el alias.
         """
         try:
-            logger.info(f"Bootstrapping: Buscando IP para servicio DNS '{self.dns_host}'...")
-            # Esta llamada usa el /etc/resolv.conf del contenedor (Docker DNS)
-            self.dns_ip = socket.gethostbyname(self.dns_host)
-            logger.info(f"DNS Service localizado en: {self.dns_ip}")
+            results = socket.getaddrinfo(self.dns_alias, self.dns_port, socket.AF_INET, socket.SOCK_STREAM)
+            ips = list(set(result[4][0] for result in results))
+            return ips
         except socket.gaierror as e:
-            logger.error(f"Fallo crítico en bootstrap: No se puede resolver '{self.dns_host}'. Error: {e}")
-            self.dns_ip = None
-
+            logger.warning(f"[DNSClientHA] No se pudo resolver alias '{self.dns_alias}': {e}")
+            return []
+        except Exception as e:
+            logger.error(f"[DNSClientHA] Error descubriendo servidores: {e}")
+            return []
+    
+    def _fetch_server_list(self, ip: str) -> bool:
+        """
+        Obtiene la lista completa de servidores DNS desde un servidor específico.
+        """
+        try:
+            url = f"http://{ip}:{self.dns_port}/dns-servers"
+            logger.debug(f"[DNSClientHA] Obteniendo lista de servidores desde {ip}...")
+            
+            response = requests.get(url, timeout=3.0)
+            response.raise_for_status()
+            
+            data = response.json()
+            all_servers = data.get("all_servers", [])
+            
+            if not all_servers:
+                return False
+            
+            # Procesar lista de servidores
+            new_servers = []
+            primary_url = None
+            
+            for srv in all_servers:
+                server_entry = {
+                    "ip": srv.get("ip", ""),
+                    "url": srv.get("url", ""),
+                    "server_id": srv.get("server_id", ""),
+                    "role": srv.get("role", "unknown"),
+                    "healthy": srv.get("healthy", True),
+                    "primary_since": srv.get("primary_since")
+                }
+                new_servers.append(server_entry)
+                
+                if srv.get("role") == "primary":
+                    primary_url = srv.get("url")
+            
+            # Ordenar: primario primero, luego por primary_since (más antiguo = más prioridad)
+            new_servers.sort(key=lambda x: (
+                0 if x["role"] == "primary" else 1,
+                x["primary_since"] or float('inf')
+            ))
+            
+            with self._lock:
+                self._dns_servers = new_servers
+                self._primary_url = primary_url
+                self._last_server_refresh = time.time()
+            
+            logger.info(f"[DNSClientHA] Lista actualizada: {len(new_servers)} servidores")
+            for srv in new_servers:
+                logger.debug(f"  - {srv['server_id']} ({srv['ip']}): {srv['role']}")
+            
+            return True
+            
+        except Exception as e:
+            logger.warning(f"[DNSClientHA] Error obteniendo lista desde {ip}: {e}")
+            return False
+    
+    def _refresh_server_list(self) -> None:
+        """
+        Actualiza la lista de servidores DNS.
+        Primero intenta via el primario, luego via cualquier servidor conocido,
+        finalmente re-descubre via alias.
+        """
+        logger.debug("[DNSClientHA] Actualizando lista de servidores...")
+        
+        # 1. Intentar con el primario actual
+        if self._primary_url:
+            try:
+                # Extraer IP del URL
+                ip = self._primary_url.replace("http://", "").split(":")[0]
+                if self._fetch_server_list(ip):
+                    return
+            except Exception:
+                pass
+        
+        # 2. Intentar con servidores conocidos
+        with self._lock:
+            servers_copy = list(self._dns_servers)
+        
+        for server in servers_copy:
+            if not server.get("healthy"):
+                continue
+            ip = server.get("ip")
+            if ip and self._fetch_server_list(ip):
+                return
+        
+        # 3. Re-descubrir via alias
+        logger.info("[DNSClientHA] Re-descubriendo servidores via alias...")
+        discovered_ips = self._discover_via_alias()
+        
+        for ip in discovered_ips:
+            if self._fetch_server_list(ip):
+                return
+        
+        logger.warning("[DNSClientHA] No se pudo actualizar la lista de servidores")
+    
+    def _maybe_refresh_servers(self) -> None:
+        """Refresca la lista de servidores si ha pasado suficiente tiempo"""
+        if time.time() - self._last_server_refresh > self._server_refresh_interval:
+            self._refresh_server_list()
+    
+    def _resolve_from_server(self, server: dict) -> Optional[str]:
+        """Helper interno - no usar directamente"""
+        pass  # Se implementa en resolve()
+    
     def resolve(self, hostname: str) -> str:
         """
-        Obtiene la IP para un hostname dado.
+        Resuelve un hostname a IP con failover automático.
         
         Flujo:
-        1. Revisa caché local (TTL).
-        2. Si falla, consulta al DNS Service vía API.
-        3. Si el DNS Service falla, hace fallback a resolución nativa.
+        1. Verificar cache local (TTL)
+        2. Intentar con el primario primero
+        3. Intentar con cada servidor DNS en orden
+        4. Si todos fallan, usar fallback a Docker DNS nativo
+        
+        Args:
+            hostname: Nombre del host a resolver
+            
+        Returns:
+            IP del hostname
+            
+        Raises:
+            socket.gaierror: Si no se puede resolver el hostname
         """
-        # 1. Verificar Caché
-        cached = self._cache.get(hostname)
-        if cached:
-            if time.time() < cached['expires_at']:
-                logger.debug(f"Cache HIT: {hostname} -> {cached['ip']}")
-                return cached['ip']
-            else:
-                logger.debug(f"Cache EXPIRED: {hostname}")
+        # 1. Verificar cache
+        with self._lock:
+            cached = self._cache.get(hostname)
+            if cached and time.time() < cached["expires_at"]:
+                logger.debug(f"[DNSClientHA] Cache HIT: {hostname} -> {cached['ip']}")
+                return cached["ip"]
+            elif cached:
+                logger.debug(f"[DNSClientHA] Cache EXPIRED: {hostname}")
                 del self._cache[hostname]
-
-        # 2. Consultar API del DNS Service
-        if self.dns_ip:
-            try:
-                url = f"http://{self.dns_ip}:{self.dns_port}/resolve/{hostname}"
-                logger.debug(f"Consultando DNS API: {url}")
+        
+        # Refrescar lista de servidores si es necesario
+        self._maybe_refresh_servers()
+        
+        # 2. Intentar con el primario primero
+        if self._primary_url:
+            ip = self._try_resolve(self._primary_url, hostname)
+            if ip:
+                return ip
+        
+        # 3. Intentar con cada servidor DNS en orden
+        with self._lock:
+            servers_copy = list(self._dns_servers)
+        
+        for server in servers_copy:
+            if not server.get("healthy"):
+                continue
+            
+            url = server.get("url")
+            if url == self._primary_url:
+                continue  # Ya lo intentamos
                 
-                response = requests.get(url, timeout=2.0)
-                response.raise_for_status()
-                
-                data = response.json()
-                ip = data['ip']
-                ttl = data.get('ttl', 300)
-                
-                # Guardar en caché
+            ip = self._try_resolve(url, hostname)
+            if ip:
+                return ip
+        
+        # Reintentar con servidores no healthy
+        logger.warning("[DNSClientHA] Todos los servidores healthy fallaron, reintentando con los demás...")
+        for server in servers_copy:
+            if server.get("healthy"):
+                continue
+            
+            url = server.get("url")
+            ip = self._try_resolve(url, hostname)
+            if ip:
+                # Marcar como healthy de nuevo
+                server["healthy"] = True
+                return ip
+        
+        # 4. Fallback: Docker DNS nativo
+        logger.warning(f"[DNSClientHA] Todos los servidores DNS fallaron. Usando fallback nativo para '{hostname}'")
+        try:
+            ip = socket.gethostbyname(hostname)
+            
+            with self._lock:
                 self._cache[hostname] = {
-                    'ip': ip,
-                    'expires_at': time.time() + ttl
+                    "ip": ip,
+                    "expires_at": time.time() + 60,
+                    "resolved_by": "fallback",
+                    "role": "native"
                 }
-                logger.info(f"Resolución remota OK: {hostname} -> {ip} (TTL={ttl}s)")
+            
+            logger.info(f"[DNSClientHA] Fallback exitoso: {hostname} -> {ip}")
+            return ip
+            
+        except socket.gaierror as e:
+            logger.error(f"[DNSClientHA] Imposible resolver '{hostname}' incluso con fallback: {e}")
+            raise
+    
+    def _try_resolve(self, url: str, hostname: str) -> Optional[str]:
+        """
+        Intenta resolver un hostname usando un servidor DNS específico.
+        """
+        try:
+            resolve_url = f"{url}/resolve/{hostname}"
+            logger.debug(f"[DNSClientHA] Consultando {url} para '{hostname}'")
+            
+            response = requests.get(resolve_url, timeout=2.0)
+            response.raise_for_status()
+            
+            data = response.json()
+            ip = data.get("ip")
+            ttl = data.get("ttl", 300)
+            server_id = data.get("server_id", "unknown")
+            role = data.get("role", "unknown")
+            
+            if ip:
+                with self._lock:
+                    self._cache[hostname] = {
+                        "ip": ip,
+                        "expires_at": time.time() + ttl,
+                        "resolved_by": server_id,
+                        "role": role
+                    }
+                
+                logger.info(f"[DNSClientHA] Resolución OK: {hostname} -> {ip} (via {server_id}/{role})")
                 return ip
                 
-            except requests.RequestException as e:
-                logger.warning(f"Error contactando DNS Service: {e}. Usando fallback.")
-        else:
-            logger.warning("DNS Service IP no disponible. Intentando re-bootstrap...")
-            self._bootstrap()
-            # Si sigue sin estar disponible, pasamos al fallback
-
-        # 3. Fallback: Resolución nativa (Docker DNS)
-        # Esto asegura que el servicio no se rompa si el contenedor DNS cae
-        try:
-            logger.info(f"Fallback: Resolviendo '{hostname}' nativamente.")
-            ip = socket.gethostbyname(hostname)
-            # Opcional: cachear el resultado del fallback por menos tiempo
-            self._cache[hostname] = {
-                'ip': ip,
-                'expires_at': time.time() + 60 # 1 minuto para fallback
+        except requests.Timeout:
+            logger.warning(f"[DNSClientHA] Timeout contactando {url}")
+            self._mark_server_unhealthy(url)
+        except requests.RequestException as e:
+            logger.warning(f"[DNSClientHA] Error con {url}: {e}")
+            self._mark_server_unhealthy(url)
+        except Exception as e:
+            logger.error(f"[DNSClientHA] Error inesperado con {url}: {e}")
+            self._mark_server_unhealthy(url)
+        
+        return None
+    
+    def _mark_server_unhealthy(self, url: str) -> None:
+        """Marca un servidor como no healthy"""
+        with self._lock:
+            for server in self._dns_servers:
+                if server.get("url") == url:
+                    server["healthy"] = False
+                    break
+    
+    def get_servers_status(self) -> List[dict]:
+        """Retorna el estado actual de todos los servidores DNS conocidos"""
+        with self._lock:
+            return [
+                {
+                    "server_id": s.get("server_id"),
+                    "ip": s.get("ip"),
+                    "url": s.get("url"),
+                    "role": s.get("role"),
+                    "healthy": s.get("healthy")
+                }
+                for s in self._dns_servers
+            ]
+    
+    def get_primary_url(self) -> Optional[str]:
+        """Retorna la URL del servidor primario actual"""
+        return self._primary_url
+    
+    def get_cache_stats(self) -> dict:
+        """Retorna estadísticas del cache local"""
+        with self._lock:
+            now = time.time()
+            valid = sum(1 for v in self._cache.values() if v["expires_at"] > now)
+            expired = len(self._cache) - valid
+            return {
+                "total_entries": len(self._cache),
+                "valid_entries": valid,
+                "expired_entries": expired
             }
-            return ip
-        except socket.gaierror:
-            logger.error(f"Imposible resolver '{hostname}' incluso con fallback.")
-            raise
+    
+    def force_refresh(self) -> None:
+        """Fuerza una actualización de la lista de servidores"""
+        self._refresh_server_list()
+
+
+# Alias para compatibilidad con código existente
+class DNSClient(DNSClientHA):
+    """
+    Alias para mantener compatibilidad con código que use DNSClient.
+    """
+    
+    def __init__(self, dns_host: str = "dns", dns_port: int = 5353):
+        # Obtener alias desde variable de entorno
+        dns_alias = os.getenv("DNS_ALIAS", dns_host)
+        
+        super().__init__(
+            dns_alias=dns_alias,
+            dns_port=dns_port
+        )

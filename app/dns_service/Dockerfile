@@ -5,6 +5,9 @@ ENV PYTHONUNBUFFERED=1
 # Cambiamos el WORKDIR a la raíz del sistema de archivos para que /app sea un módulo importable
 WORKDIR /
 
+# Instalar curl para healthchecks
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+
 COPY app/dns_service/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --default-timeout=1000 -r /tmp/requirements.txt && rm /tmp/requirements.txt
 

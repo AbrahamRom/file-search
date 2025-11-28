@@ -8,13 +8,68 @@ Plataforma compuesta por un backend FastAPI y un cliente web en Streamlit para l
 - API REST con endpoints de salud, búsqueda paginada, consulta y descarga de archivos.
 - Cliente Streamlit con búsqueda por nombre, filtro por tipo, paginación y enlaces de descarga.
 - Sistema de logging unificado (aplicación y access logs) escribiendo en `/app/logs`.
+- **Arquitectura DNS de Alta Disponibilidad** con servidor primario, dos backups y proxy con failover automático.
 - Imágenes Docker separadas para la API (`Dockerfile.server`) y el cliente (`Dockerfile.client`) listas para ejecutarse en redes Swarm o entornos distribuidos.
+
+## 🌐 Arquitectura DNS de Alta Disponibilidad
+
+El sistema incluye una arquitectura robusta de DNS con alta disponibilidad:
+
+### Componentes
+
+1. **DNS Proxy** (`dns_proxy` - Puerto 5350)
+   - Punto de entrada único para todas las solicitudes DNS
+   - Failover automático entre servidores
+   - Health checks periódicos de todos los servidores DNS
+   - Enrutamiento inteligente hacia servidores saludables
+
+2. **DNS Primario** (`dns_primary` - Puerto 5353)
+   - Servidor DNS principal que maneja resoluciones
+   - Propaga actualizaciones a servidores backup
+   - Cache de resoluciones DNS
+   - Logging completo de todas las operaciones
+
+3. **DNS Backup 1** (`dns_backup_1` - Puerto 5354)
+   - Servidor de respaldo que sincroniza con el primario
+   - Sincronización periódica cada 30 segundos
+   - Toma el control automáticamente si el primario falla
+   - Mantiene cache sincronizado
+
+4. **DNS Backup 2** (`dns_backup_2` - Puerto 5355)
+   - Segundo servidor de respaldo independiente
+   - Proporciona redundancia adicional
+   - Sincronización automática con el primario
+   - Failover de tercer nivel
+
+### Características de Alta Disponibilidad
+
+- **Replicación automática**: Los servidores backup se sincronizan automáticamente con el primario cada 30 segundos
+- **Failover transparente**: El proxy detecta fallos y redirige el tráfico sin intervención manual
+- **Health monitoring**: Verificación continua del estado de todos los servidores cada 10 segundos
+- **Cache distribuido**: Cada servidor mantiene su propio cache para respuestas rápidas
+- **Logging exhaustivo**: Todas las operaciones se registran con identificadores de servidor
+- **Recuperación automática**: Servidores caídos se reintegran automáticamente al recuperarse
+
+### Flujo de Operación
+
+1. Cliente solicita resolución DNS al proxy (puerto 5350)
+2. Proxy intenta resolver con el servidor primario
+3. Si el primario falla, proxy intenta con backup_1
+4. Si backup_1 falla, proxy intenta con backup_2
+5. Servidores backup sincronizan su cache con el primario cada 30 segundos
+6. Health checks actualizan el estado de disponibilidad cada 10 segundos
 
 ## 📂 Estructura relevante
 
 ```text
 app/
 ├── main.py              # Punto de entrada (configura logs y expone la app FastAPI)
+├── dns_service/
+│   ├── main.py          # Servidor DNS con sincronización y cache
+│   ├── proxy.py         # Proxy DNS con failover automático
+│   ├── logging_config.py# Configuración de logs DNS
+│   ├── Dockerfile       # Imagen para servidores DNS
+│   └── Dockerfile.proxy # Imagen para proxy DNS
 ├── server/
 │   ├── api/endpoints.py # Endpoints de la API
 │   ├── logging_config.py# Configuración centralizada de logging
@@ -43,7 +98,7 @@ docker run --rm -p 8501:8501 -e API_BASE_URL=http://host.docker.internal:8000 fi
 
 ### Puesta en marcha con Docker Compose
 
-Puedes inicializar ambos servicios y definir la ruta de los archivos a indexar usando variables de entorno:
+La arquitectura de alta disponibilidad DNS se despliega automáticamente con Docker Compose:
 
 ```bash
 # 1. Elige la carpeta de archivos que deseas compartir (por ejemplo /home/usuario/documentos)
@@ -52,8 +107,41 @@ export FILES_SOURCE=/home/usuario/documentos
 # 2. (Opcional) Cambia la ruta interna del contenedor donde se indexarán los archivos
 export FILES_ROOT=/app/files
 
-# 3. Inicia ambos servicios
+# 3. Inicia todos los servicios (incluye DNS Proxy + Primary + 2 Backups)
 docker compose up --build
+```
+
+Los siguientes servicios estarán disponibles:
+
+- **DNS Proxy**: `http://localhost:5350` - Punto de entrada con failover
+- **DNS Primario**: `http://localhost:5353` - Servidor principal
+- **DNS Backup 1**: `http://localhost:5354` - Primera réplica
+- **DNS Backup 2**: `http://localhost:5355` - Segunda réplica
+- **API**: `http://localhost:8000` - API de archivos
+- **Cliente Web**: `http://localhost:8501` - Interfaz Streamlit
+
+### Verificar estado de DNS
+
+```bash
+# Estado del proxy y servidores
+curl http://localhost:5350/health
+
+# Estado del servidor primario
+curl http://localhost:5353/health
+
+# Estado de los backups
+curl http://localhost:5354/health
+curl http://localhost:5355/health
+```
+
+### Probar resolución DNS
+
+```bash
+# Resolver un hostname a través del proxy
+curl http://localhost:5350/resolve/server
+
+# Resolver directamente desde el primario
+curl http://localhost:5353/resolve/client
 ```
 
 ---
