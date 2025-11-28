@@ -53,6 +53,10 @@ def _iter_file_records(root: Path) -> Iterator[FileRecord]:
 	if not root.exists():
 		logger.info("Files root %s does not exist; creating it", root)
 		root.mkdir(parents=True, exist_ok=True)
+		try:
+			root.chmod(0o777)
+		except Exception:
+			pass
 
 	for file_path in root.rglob("*"):
 		if not file_path.is_file():

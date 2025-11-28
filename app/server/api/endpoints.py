@@ -98,6 +98,10 @@ async def upload_file_endpoint(
         if folder:
             target_dir = target_dir / folder
             os.makedirs(target_dir, exist_ok=True)
+            try:
+                os.chmod(target_dir, 0o777)
+            except Exception:
+                pass
         
         # Guardar el archivo
         file_path = target_dir / file.filename

@@ -37,6 +37,10 @@ def configure_logging(
 
     target_dir = _resolve_log_dir(log_dir) if log_dir else DEFAULT_LOG_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        target_dir.chmod(0o777)
+    except Exception:
+        pass
 
     app_log_path = target_dir / "dns_service.log"
 
