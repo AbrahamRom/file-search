@@ -29,7 +29,7 @@ services:
       - dns_service
     restart: unless-stopped
 
-  client:
+  client_primary:
     build:
       context: .
       dockerfile: Dockerfile.client
@@ -44,6 +44,32 @@ services:
       # Fallback y configuración de navegador
       - API_BASE_URL=http://server:8000
       - BROWSER_API_URL=http://localhost:8000
+    restart: unless-stopped
+
+  client_backup:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    depends_on:
+      - server
+      - dns_service
+    environment:
+      # Variables para el descubrimiento de servicios
+      - DNS_SERVICE_HOST=dns_service
+      - TARGET_SERVICE_NAME=server
+      - TARGET_SERVICE_PORT=8000
+      # Fallback y configuración de navegador
+      - API_BASE_URL=http://server:8000
+      - BROWSER_API_URL=http://localhost:8000
+    restart: unless-stopped
+
+  client_router:
+    build:
+      context: app/client_router
+      dockerfile: Dockerfile
+    depends_on:
+      - client_primary
+      - client_backup
     ports:
       - "8501:8501"
     restart: unless-stopped

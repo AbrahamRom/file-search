@@ -115,6 +115,43 @@ FILES_SOURCE=/home/usuario/documentos docker compose up --build
 
 Esto montará `/home/usuario/documentos` en el contenedor y la API indexará esos archivos.
 
+## 🔁 Failover del Cliente (Streamlit) sin cambiar URL
+
+Este proyecto implementa alta disponibilidad del cliente usando un router de failover basado en HAProxy:
+
+- Dos instancias del cliente (`client_primary` y `client_backup`) corren dentro de la red interna de Docker, sin exponer puertos al host.
+- Un `client_router` expone el puerto `8501` al host y realiza health checks contra ambas instancias.
+- Si el cliente primario cae, el router conmuta automáticamente al respaldo manteniendo la misma URL: `http://localhost:8501`.
+
+Cómo arrancar:
+
+```bash
+docker compose up --build -d
+```
+
+Verifica el estado:
+
+- Cliente (router): `http://localhost:8501`
+- API: `http://localhost:8000/health`
+- DNS interno: `http://localhost:5353/health`
+
+Simular caída del cliente primario y ver conmutación:
+
+```bash
+# Parar el primario
+docker compose stop client_primary
+
+# El router seguirá sirviendo en 8501 usando el respaldo
+# Para restaurar primario
+docker compose start client_primary
+```
+
+Notas:
+
+- No se han añadido nuevos volúmenes; se reutilizan los existentes para archivos y logs.
+- El `client_router` utiliza health checks HTTP simples (`GET /`) compatibles con Streamlit.
+- La resolución DNS interna (servicio `dns_service`) se mantiene para el descubrimiento de la API por parte del cliente.
+
 ## 🧾 Endpoints principales
 
 | Método | Ruta                         | Descripción                               |
