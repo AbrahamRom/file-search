@@ -7,8 +7,11 @@ services:
       - "5353:5353"
     environment:
       - LOG_DIR=/app/logs
+      - ENABLE_CLIENT_WATCHDOG=true
+      - CLIENT_WATCHDOG_INTERVAL=5
     volumes:
       - ./runtime/logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
   server:
