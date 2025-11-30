@@ -111,19 +111,25 @@ services:
 
   # ============================================================================
   # SERVIDOR API
+  # Los archivos se COPIAN dentro del contenedor al inicio
+  # Los logs permanecen como volumen persistente
   # ============================================================================
   server:
     image: file-search-api:latest
     environment:
-      - FILES_ROOT=${FILES_ROOT:-/app/files}
+      - FILES_ROOT=/app/files
+      - FILES_SOURCE_PATH=/tmp/source_files
       - LOG_DIR=/app/logs
       # Alias DNS para descubrimiento dinámico
       - DNS_ALIAS=dns
       - DNS_SERVICE_PORT=5353
     volumes:
+      # Montaje temporal de solo lectura para copiar archivos al inicio
       - type: bind
         source: ${FILES_SOURCE:-/srv/file-search/files}
-        target: /app/files
+        target: /tmp/source_files
+        read_only: true
+      # Los logs SÍ se mantienen como volumen persistente
       - type: bind
         source: ${LOGS_SOURCE:-/srv/file-search/logs}
         target: /app/logs

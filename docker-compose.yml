@@ -102,6 +102,8 @@ services:
 
   # ============================================================================
   # SERVIDOR API
+  # Los archivos se COPIAN dentro del contenedor al inicio
+  # Los logs permanecen como volumen persistente
   # ============================================================================
   server:
     build:
@@ -110,13 +112,16 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - FILES_ROOT=${FILES_ROOT:-/app/files}
+      - FILES_ROOT=/app/files
+      - FILES_SOURCE_PATH=/tmp/source_files
       - LOG_DIR=/app/logs
       # Alias DNS para descubrimiento dinámico
       - DNS_ALIAS=dns
       - DNS_SERVICE_PORT=5353
     volumes:
-      - ${FILES_SOURCE:-./runtime/files}:/app/files
+      # Montaje temporal de solo lectura para copiar archivos al inicio
+      - ${FILES_SOURCE:-./runtime/files}:/tmp/source_files:ro
+      # Los logs SÍ se mantienen como volumen persistente
       - ./runtime/logs:/app/logs
     depends_on:
       dns_1:
