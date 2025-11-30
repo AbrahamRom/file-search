@@ -8,3 +8,4 @@ app/server/db/doc_search.db
 .env/
 env
 .bash
+entregas.md

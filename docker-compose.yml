@@ -1,5 +1,12 @@
 services:
-  dns_service:
+  # ============================================================================
+  # SERVIDORES DNS CON ALTA DISPONIBILIDAD
+  # Todos comparten el alias 'dns' para descubrimiento dinámico
+  # El número de instancias es configurable sin cambiar código
+  # ============================================================================
+  
+  # Servidor DNS 1
+  dns_1:
     build:
       context: .
       dockerfile: app/dns_service/Dockerfile
@@ -7,10 +14,95 @@ services:
       - "5353:5353"
     environment:
       - LOG_DIR=/app/logs
+      - LOG_LEVEL=INFO
+      - DNS_SERVER_ID=dns_1
+      - DNS_PORT=5353
+      - DNS_ALIAS=dns
+      - HEALTH_CHECK_INTERVAL=5
+      - SYNC_INTERVAL=30
+      - DISCOVERY_INTERVAL=15
     volumes:
       - ./runtime/logs:/app/logs
     restart: unless-stopped
+    networks:
+      app_network:
+        aliases:
+          - dns
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5353/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
+  # Servidor DNS 2
+  dns_2:
+    build:
+      context: .
+      dockerfile: app/dns_service/Dockerfile
+    ports:
+      - "5354:5353"
+    environment:
+      - LOG_DIR=/app/logs
+      - LOG_LEVEL=INFO
+      - DNS_SERVER_ID=dns_2
+      - DNS_PORT=5353
+      - DNS_ALIAS=dns
+      - HEALTH_CHECK_INTERVAL=5
+      - SYNC_INTERVAL=30
+      - DISCOVERY_INTERVAL=15
+    volumes:
+      - ./runtime/logs:/app/logs
+    restart: unless-stopped
+    networks:
+      app_network:
+        aliases:
+          - dns
+    depends_on:
+      - dns_1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5353/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Servidor DNS 3
+  dns_3:
+    build:
+      context: .
+      dockerfile: app/dns_service/Dockerfile
+    ports:
+      - "5355:5353"
+    environment:
+      - LOG_DIR=/app/logs
+      - LOG_LEVEL=INFO
+      - DNS_SERVER_ID=dns_3
+      - DNS_PORT=5353
+      - DNS_ALIAS=dns
+      - HEALTH_CHECK_INTERVAL=5
+      - SYNC_INTERVAL=30
+      - DISCOVERY_INTERVAL=15
+    volumes:
+      - ./runtime/logs:/app/logs
+    restart: unless-stopped
+    networks:
+      app_network:
+        aliases:
+          - dns
+    depends_on:
+      - dns_1
+      - dns_2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5353/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ============================================================================
+  # SERVIDOR API
+  # ============================================================================
   server:
     build:
       context: .
@@ -20,25 +112,40 @@ services:
     environment:
       - FILES_ROOT=${FILES_ROOT:-/app/files}
       - LOG_DIR=/app/logs
-      # Configuración para usar el DNS Service si el servidor necesitara resolver otros servicios
-      - DNS_SERVICE_HOST=dns_service
+      # Alias DNS para descubrimiento dinámico
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
     volumes:
       - ${FILES_SOURCE:-./runtime/files}:/app/files
       - ./runtime/logs:/app/logs
     depends_on:
-      - dns_service
+      dns_1:
+        condition: service_healthy
+      dns_2:
+        condition: service_healthy
+      dns_3:
+        condition: service_healthy
     restart: unless-stopped
+    networks:
+      - app_network
 
+  # ============================================================================
+  # CLIENTE WEB
+  # ============================================================================
   client:
     build:
       context: .
       dockerfile: Dockerfile.client
     depends_on:
-      - server
-      - dns_service
+      server:
+        condition: service_started
+      dns_1:
+        condition: service_healthy
     environment:
-      # Variables para el descubrimiento de servicios
-      - DNS_SERVICE_HOST=dns_service
+      # Alias DNS para descubrimiento dinámico
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      # Servicio objetivo
       - TARGET_SERVICE_NAME=server
       - TARGET_SERVICE_PORT=8000
       # Fallback y configuración de navegador
@@ -47,3 +154,9 @@ services:
     ports:
       - "8501:8501"
     restart: unless-stopped
+    networks:
+      - app_network
+
+networks:
+  app_network:
+    driver: bridge

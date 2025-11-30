@@ -1,20 +1,38 @@
 version: "3.9"
 
 services:
-  dns_service:
+  # ============================================================================
+  # SERVIDORES DNS CON ALTA DISPONIBILIDAD
+  # Todos comparten el alias 'dns' para descubrimiento dinámico
+  # El número de instancias es configurable sin cambiar código
+  # ============================================================================
+  
+  # Servidor DNS 1
+  dns_1:
     image: file-search-dns:latest
     environment:
       - LOG_DIR=/app/logs
+      - LOG_LEVEL=INFO
+      - DNS_SERVER_ID=dns_1
+      - DNS_PORT=5353
+      - DNS_ALIAS=dns
+      - HEALTH_CHECK_INTERVAL=5
+      - SYNC_INTERVAL=30
+      - DISCOVERY_INTERVAL=15
     volumes:
       - type: bind
         source: ${LOGS_SOURCE:-/srv/file-search/logs}
         target: /app/logs
     networks:
-      - file_search_net
+      file_search_net:
+        aliases:
+          - dns
     deploy:
       replicas: 1
       restart_policy:
         condition: on-failure
+        delay: 5s
+        max_attempts: 3
       placement:
         constraints:
           - node.role == manager
@@ -23,12 +41,85 @@ services:
         published: 5353
         mode: ingress
 
+  # Servidor DNS 2
+  dns_2:
+    image: file-search-dns:latest
+    environment:
+      - LOG_DIR=/app/logs
+      - LOG_LEVEL=INFO
+      - DNS_SERVER_ID=dns_2
+      - DNS_PORT=5353
+      - DNS_ALIAS=dns
+      - HEALTH_CHECK_INTERVAL=5
+      - SYNC_INTERVAL=30
+      - DISCOVERY_INTERVAL=15
+    volumes:
+      - type: bind
+        source: ${LOGS_SOURCE:-/srv/file-search/logs}
+        target: /app/logs
+    networks:
+      file_search_net:
+        aliases:
+          - dns
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == worker
+    ports:
+      - target: 5353
+        published: 5354
+        mode: ingress
+
+  # Servidor DNS 3
+  dns_3:
+    image: file-search-dns:latest
+    environment:
+      - LOG_DIR=/app/logs
+      - LOG_LEVEL=INFO
+      - DNS_SERVER_ID=dns_3
+      - DNS_PORT=5353
+      - DNS_ALIAS=dns
+      - HEALTH_CHECK_INTERVAL=5
+      - SYNC_INTERVAL=30
+      - DISCOVERY_INTERVAL=15
+    volumes:
+      - type: bind
+        source: ${LOGS_SOURCE:-/srv/file-search/logs}
+        target: /app/logs
+    networks:
+      file_search_net:
+        aliases:
+          - dns
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == worker
+    ports:
+      - target: 5353
+        published: 5355
+        mode: ingress
+
+  # ============================================================================
+  # SERVIDOR API
+  # ============================================================================
   server:
     image: file-search-api:latest
     environment:
       - FILES_ROOT=${FILES_ROOT:-/app/files}
       - LOG_DIR=/app/logs
-      - DNS_SERVICE_HOST=dns_service
+      # Alias DNS para descubrimiento dinámico
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
     volumes:
       - type: bind
         source: ${FILES_SOURCE:-/srv/file-search/files}
@@ -42,6 +133,8 @@ services:
       replicas: 1
       restart_policy:
         condition: on-failure
+        delay: 5s
+        max_attempts: 3
       placement:
         constraints:
           - node.role == manager
@@ -50,12 +143,19 @@ services:
         published: 8000
         mode: ingress
 
+  # ============================================================================
+  # CLIENTE WEB
+  # ============================================================================
   client:
     image: file-search-client:latest
     environment:
-      - DNS_SERVICE_HOST=dns_service
+      # Alias DNS para descubrimiento dinámico
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      # Servicio objetivo
       - TARGET_SERVICE_NAME=server
       - TARGET_SERVICE_PORT=8000
+      # Fallback y configuración de navegador
       - API_BASE_URL=http://server:8000
       - BROWSER_API_URL=${BROWSER_API_URL:-http://localhost:8000}
     networks:
@@ -64,6 +164,8 @@ services:
       replicas: 1
       restart_policy:
         condition: on-failure
+        delay: 5s
+        max_attempts: 3
       placement:
         constraints:
           - node.role == worker

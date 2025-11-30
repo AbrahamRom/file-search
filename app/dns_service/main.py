@@ -1,52 +1,752 @@
 import socket
 import logging
 import os
-from fastapi import FastAPI, HTTPException
+import time
+import asyncio
+from typing import Dict, Optional, List, Set
+from datetime import datetime
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
+import httpx
 from .logging_config import configure_logging
 
 # Configurar logs al iniciar
 configure_logging()
 logger = logging.getLogger("dns_service")
 
-app = FastAPI(title="Internal DNS Service", version="1.0.0")
+app = FastAPI(title="Internal DNS Service HA", version="2.1.0")
+
+# ============================================================================
+# CONFIGURACIÓN DEL SERVIDOR
+# ============================================================================
+
+# Identificador único del servidor (DEBE ser único por instancia)
+server_id = os.getenv("DNS_SERVER_ID", f"dns_{socket.gethostname()}")
+
+# Alias común para descubrimiento via Docker DNS (todos los DNS comparten este alias)
+DNS_ALIAS = os.getenv("DNS_ALIAS", "dns")
+
+# Puerto DNS
+dns_port = int(os.getenv("DNS_PORT", 5353))
+
+# Intervalos de configuración
+HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", 5))  # 5 segundos
+SYNC_INTERVAL = int(os.getenv("SYNC_INTERVAL", 30))  # 30 segundos
+DISCOVERY_INTERVAL = int(os.getenv("DISCOVERY_INTERVAL", 15))  # Re-descubrir cada 15s
+
+# ============================================================================
+# ESTADO DEL SERVIDOR
+# ============================================================================
+
+# Rol actual del servidor (se determina dinámicamente)
+server_role = "unknown"  # primary, backup, unknown
+
+# Timestamp de cuando me convertí en primario (para resolver conflictos)
+primary_since: Optional[float] = None
+
+# Cache de resoluciones DNS
+dns_cache: Dict[str, dict] = {}
+
+# Estado del clúster DNS (descubierto dinámicamente)
+# {server_id: {url, hostname, healthy, role, last_seen, primary_since}}
+cluster_state: Dict[str, dict] = {}
+
+# IPs conocidas de servidores DNS (para evitar duplicados)
+known_dns_ips: Set[str] = set()
+
+# Estado de sincronización
+sync_status = {
+    "last_sync": None,
+    "sync_count": 0,
+    "is_syncing": False
+}
+
+# URL del primario actual
+current_primary_url: Optional[str] = None
+
+# Mi propia IP y hostname
+my_ip: Optional[str] = None
+my_hostname: Optional[str] = None
+
+start_time = time.time()
+
+
+# ============================================================================
+# MODELOS PYDANTIC
+# ============================================================================
 
 class ResolutionResponse(BaseModel):
     hostname: str
     ip: str
     ttl: int
+    server_id: str
+    role: str
 
-@app.get("/health")
+
+class SyncData(BaseModel):
+    cache: Dict[str, dict]
+    timestamp: str
+    source_id: str
+
+
+class HealthResponse(BaseModel):
+    status: str
+    service: str
+    role: str
+    server_id: str
+    ip: Optional[str]
+    cache_size: int
+    last_sync: Optional[str]
+    uptime: float
+    primary_since: Optional[float]
+
+
+class DNSServerInfo(BaseModel):
+    server_id: str
+    url: str
+    ip: str
+    role: str
+    healthy: bool
+    primary_since: Optional[float]
+
+
+class DNSServersResponse(BaseModel):
+    primary: Optional[DNSServerInfo]
+    backups: List[DNSServerInfo]
+    all_servers: List[DNSServerInfo]
+    dns_alias: str
+    timestamp: str
+
+
+class ClusterStatusResponse(BaseModel):
+    server_id: str
+    role: str
+    my_ip: Optional[str]
+    cluster_members: Dict[str, dict]
+    primary_url: Optional[str]
+    cache_size: int
+    last_sync: Optional[str]
+    uptime: float
+    dns_alias: str
+
+
+class RegisterRequest(BaseModel):
+    server_id: str
+    ip: str
+    hostname: str
+    role: str
+    primary_since: Optional[float] = None
+
+
+# ============================================================================
+# ENDPOINTS
+# ============================================================================
+
+@app.get("/health", response_model=HealthResponse)
 def health():
-    return {"status": "ok", "service": "dns-resolver"}
+    """Endpoint de salud del servicio DNS"""
+    return HealthResponse(
+        status="ok",
+        service="dns-resolver-ha",
+        role=server_role,
+        server_id=server_id,
+        ip=my_ip,
+        cache_size=len(dns_cache),
+        last_sync=sync_status["last_sync"],
+        uptime=time.time() - start_time,
+        primary_since=primary_since
+    )
+
+
+@app.get("/dns-servers", response_model=DNSServersResponse)
+def get_dns_servers():
+    """
+    Retorna la lista de todos los servidores DNS disponibles.
+    Los clientes usan este endpoint para obtener la lista de failover.
+    """
+    logger.info(f"[{server_id}] Solicitud de lista de servidores DNS")
+    
+    primary = None
+    backups = []
+    all_servers = []
+    
+    for sid, info in cluster_state.items():
+        server_info = DNSServerInfo(
+            server_id=sid,
+            url=info.get("url", ""),
+            ip=info.get("ip", ""),
+            role=info.get("role", "unknown"),
+            healthy=info.get("healthy", False),
+            primary_since=info.get("primary_since")
+        )
+        all_servers.append(server_info)
+        
+        if info.get("role") == "primary" and info.get("healthy"):
+            primary = server_info
+        elif info.get("healthy"):
+            backups.append(server_info)
+    
+    # Ordenar backups por primary_since (más antiguo primero como fallback)
+    backups.sort(key=lambda x: x.primary_since or float('inf'))
+    
+    return DNSServersResponse(
+        primary=primary,
+        backups=backups,
+        all_servers=all_servers,
+        dns_alias=DNS_ALIAS,
+        timestamp=datetime.now().isoformat()
+    )
+
+
+@app.get("/cluster-status", response_model=ClusterStatusResponse)
+def get_cluster_status():
+    """Retorna el estado completo del clúster DNS"""
+    return ClusterStatusResponse(
+        server_id=server_id,
+        role=server_role,
+        my_ip=my_ip,
+        cluster_members=cluster_state,
+        primary_url=current_primary_url,
+        cache_size=len(dns_cache),
+        last_sync=sync_status["last_sync"],
+        uptime=time.time() - start_time,
+        dns_alias=DNS_ALIAS
+    )
+
 
 @app.get("/resolve/{hostname}", response_model=ResolutionResponse)
-def resolve_hostname(hostname: str):
-    """
-    Resuelve un nombre de host a su dirección IP utilizando el DNS del entorno (Docker).
-    """
-    logger.info(f"Solicitud de resolución recibida para: {hostname}")
+async def resolve_hostname(hostname: str, background_tasks: BackgroundTasks):
+    """Resuelve un nombre de host a su dirección IP"""
+    logger.info(f"[{server_id}][{server_role}] Solicitud de resolución: {hostname}")
+    
+    # Verificar cache primero
+    if hostname in dns_cache:
+        cache_entry = dns_cache[hostname]
+        if time.time() - cache_entry["timestamp"] < cache_entry["ttl"]:
+            logger.info(f"[{server_id}] Cache HIT: {hostname} -> {cache_entry['ip']}")
+            return ResolutionResponse(
+                hostname=hostname,
+                ip=cache_entry["ip"],
+                ttl=cache_entry["ttl"],
+                server_id=server_id,
+                role=server_role
+            )
     
     try:
-        # Esta llamada usa el resolver del sistema (en el contenedor, el DNS de Docker 127.0.0.11)
         ip_address = socket.gethostbyname(hostname)
         
-        logger.info(f"Resolución exitosa: {hostname} -> {ip_address}")
+        dns_cache[hostname] = {
+            "ip": ip_address,
+            "ttl": 300,
+            "timestamp": time.time()
+        }
+        
+        logger.info(f"[{server_id}] Resolución exitosa: {hostname} -> {ip_address}")
+        
+        if server_role == "primary":
+            background_tasks.add_task(propagate_to_backups, hostname, ip_address)
         
         return ResolutionResponse(
-            hostname=hostname, 
-            ip=ip_address, 
-            ttl=300  # 5 minutos de caché sugerido
+            hostname=hostname,
+            ip=ip_address,
+            ttl=300,
+            server_id=server_id,
+            role=server_role
         )
         
     except socket.gaierror as e:
-        logger.warning(f"No se pudo resolver el host '{hostname}': {e}")
-        raise HTTPException(status_code=404, detail=f"Hostname '{hostname}' not found or unreachable")
+        logger.warning(f"[{server_id}] No se pudo resolver '{hostname}': {e}")
+        raise HTTPException(status_code=404, detail=f"Hostname '{hostname}' not found")
     except Exception as e:
-        logger.error(f"Error inesperado resolviendo '{hostname}': {e}")
+        logger.error(f"[{server_id}] Error inesperado: {e}")
         raise HTTPException(status_code=500, detail="Internal DNS error")
+
+
+@app.post("/sync")
+async def receive_sync(sync_data: SyncData):
+    """Recibe actualizaciones de sincronización desde el primario"""
+    logger.info(f"[{server_id}] Recibiendo sync desde {sync_data.source_id}. Entradas: {len(sync_data.cache)}")
+    
+    for hostname, entry in sync_data.cache.items():
+        dns_cache[hostname] = entry
+    
+    sync_status["last_sync"] = datetime.now().isoformat()
+    sync_status["sync_count"] += 1
+    
+    logger.info(f"[{server_id}] Sync completada. Cache: {len(dns_cache)} entradas")
+    
+    return {"status": "synced", "entries": len(dns_cache), "receiver": server_id}
+
+
+@app.get("/cache")
+def get_cache():
+    """Obtiene el estado del cache"""
+    return {
+        "cache": dns_cache,
+        "timestamp": datetime.now().isoformat(),
+        "server_id": server_id,
+        "role": server_role
+    }
+
+
+@app.post("/register")
+async def register_dns_server(request: RegisterRequest):
+    """
+    Endpoint para que otros servidores DNS se registren.
+    Permite descubrimiento mutuo.
+    """
+    logger.info(f"[{server_id}] Registro de servidor DNS: {request.server_id} ({request.ip})")
+    
+    cluster_state[request.server_id] = {
+        "url": f"http://{request.ip}:{dns_port}",
+        "ip": request.ip,
+        "hostname": request.hostname,
+        "healthy": True,
+        "role": request.role,
+        "primary_since": request.primary_since,
+        "last_seen": datetime.now().isoformat()
+    }
+    known_dns_ips.add(request.ip)
+    
+    # Retornar mi información y el estado del clúster
+    return {
+        "status": "registered",
+        "my_id": server_id,
+        "my_ip": my_ip,
+        "my_role": server_role,
+        "primary_since": primary_since,
+        "cluster_size": len(cluster_state)
+    }
+
+
+@app.post("/notify-new-primary")
+async def receive_new_primary_notification(data: dict):
+    """Recibe notificación de un nuevo primario"""
+    global server_role, current_primary_url, primary_since
+    
+    new_primary_id = data.get("new_primary_id")
+    new_primary_url = data.get("new_primary_url")
+    new_primary_since = data.get("primary_since")
+    
+    logger.info(f"[{server_id}] Notificación: nuevo primario es {new_primary_id}")
+    
+    if server_role == "primary" and new_primary_id != server_id:
+        # Resolver conflicto: el que fue primario primero gana
+        if new_primary_since and primary_since:
+            if new_primary_since < primary_since:
+                logger.warning(f"[{server_id}] {new_primary_id} fue primario antes. Cediendo rol...")
+                server_role = "backup"
+                current_primary_url = new_primary_url
+                primary_since = None
+        else:
+            # Sin timestamp, ceder por defecto
+            server_role = "backup"
+            current_primary_url = new_primary_url
+            primary_since = None
+    
+    if new_primary_id in cluster_state:
+        cluster_state[new_primary_id]["role"] = "primary"
+        cluster_state[new_primary_id]["primary_since"] = new_primary_since
+    
+    current_primary_url = new_primary_url
+    
+    return {"status": "acknowledged", "server_id": server_id}
+
+
+# ============================================================================
+# DESCUBRIMIENTO DINÁMICO
+# ============================================================================
+
+def get_my_ip() -> Optional[str]:
+    """Obtiene la IP de este contenedor"""
+    try:
+        # Crear un socket y conectar a una IP externa para obtener nuestra IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except Exception:
+            return None
+
+
+async def discover_via_dns_alias():
+    """
+    Descubre otros servidores DNS usando el alias común de Docker DNS.
+    Docker DNS retorna todas las IPs que comparten el alias.
+    """
+    global known_dns_ips, cluster_state
+    
+    logger.debug(f"[{server_id}] Descubriendo servidores via alias '{DNS_ALIAS}'...")
+    
+    try:
+        # getaddrinfo retorna todas las IPs asociadas al alias
+        results = socket.getaddrinfo(DNS_ALIAS, dns_port, socket.AF_INET, socket.SOCK_STREAM)
+        discovered_ips = set(result[4][0] for result in results)
+        
+        logger.info(f"[{server_id}] IPs descubiertas via alias: {discovered_ips}")
+        
+        # Contactar cada IP descubierta (excepto la nuestra)
+        for ip in discovered_ips:
+            if ip == my_ip:
+                continue
+                
+            if ip in known_dns_ips:
+                # Ya conocemos este servidor, solo actualizar estado
+                await check_server_health(ip)
+            else:
+                # Nuevo servidor, registrarse mutuamente
+                await register_with_server(ip)
+                
+    except socket.gaierror as e:
+        logger.debug(f"[{server_id}] No se pudo resolver alias '{DNS_ALIAS}': {e}")
+    except Exception as e:
+        logger.error(f"[{server_id}] Error en descubrimiento: {e}")
+
+
+async def register_with_server(ip: str):
+    """Registra este servidor con otro servidor DNS"""
+    try:
+        url = f"http://{ip}:{dns_port}"
+        
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            # Registrarme con el otro servidor
+            response = await client.post(f"{url}/register", json={
+                "server_id": server_id,
+                "ip": my_ip,
+                "hostname": my_hostname,
+                "role": server_role,
+                "primary_since": primary_since
+            })
+            
+            if response.status_code == 200:
+                data = response.json()
+                other_id = data.get("my_id")
+                other_ip = data.get("my_ip")
+                other_role = data.get("my_role")
+                other_primary_since = data.get("primary_since")
+                
+                # Agregar al estado del clúster
+                cluster_state[other_id] = {
+                    "url": url,
+                    "ip": ip,
+                    "hostname": other_id,
+                    "healthy": True,
+                    "role": other_role,
+                    "primary_since": other_primary_since,
+                    "last_seen": datetime.now().isoformat()
+                }
+                known_dns_ips.add(ip)
+                
+                logger.info(f"[{server_id}] Registrado con {other_id} ({ip}), rol={other_role}")
+                
+    except Exception as e:
+        logger.warning(f"[{server_id}] No se pudo registrar con {ip}: {e}")
+
+
+async def check_server_health(ip: str):
+    """Verifica el estado de un servidor DNS conocido"""
+    try:
+        url = f"http://{ip}:{dns_port}"
+        
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(f"{url}/health")
+            
+            if response.status_code == 200:
+                data = response.json()
+                sid = data.get("server_id")
+                
+                if sid in cluster_state:
+                    cluster_state[sid]["healthy"] = True
+                    cluster_state[sid]["role"] = data.get("role", "unknown")
+                    cluster_state[sid]["primary_since"] = data.get("primary_since")
+                    cluster_state[sid]["last_seen"] = datetime.now().isoformat()
+                else:
+                    # Servidor nuevo, registrar
+                    cluster_state[sid] = {
+                        "url": url,
+                        "ip": ip,
+                        "hostname": sid,
+                        "healthy": True,
+                        "role": data.get("role", "unknown"),
+                        "primary_since": data.get("primary_since"),
+                        "last_seen": datetime.now().isoformat()
+                    }
+                    known_dns_ips.add(ip)
+                    
+                return True
+                
+    except Exception as e:
+        # Marcar como no healthy
+        for sid, info in cluster_state.items():
+            if info.get("ip") == ip:
+                cluster_state[sid]["healthy"] = False
+                break
+        return False
+    
+    return False
+
+
+async def determine_role():
+    """
+    Determina el rol de este servidor basándose en el estado del clúster.
+    """
+    global server_role, current_primary_url, primary_since
+    
+    # Buscar si hay un primario activo
+    active_primary = None
+    for sid, info in cluster_state.items():
+        if sid == server_id:
+            continue
+        if info.get("role") == "primary" and info.get("healthy"):
+            active_primary = (sid, info)
+            break
+    
+    if active_primary:
+        # Ya hay un primario, soy backup
+        if server_role != "backup":
+            logger.info(f"[{server_id}] Primario activo: {active_primary[0]}. Configurándome como BACKUP")
+            server_role = "backup"
+            primary_since = None
+            current_primary_url = active_primary[1].get("url")
+            
+            # Sincronizar inmediatamente
+            await sync_from_primary()
+    else:
+        # No hay primario activo
+        if server_role == "primary":
+            # Ya soy primario, mantener
+            pass
+        else:
+            # Verificar si debo promoverme
+            should_promote = True
+            
+            # Verificar si hay otro servidor que debería ser primario antes
+            for sid, info in cluster_state.items():
+                if sid == server_id:
+                    continue
+                if not info.get("healthy"):
+                    continue
+                    
+                # Si hay otro servidor que fue primario antes, esperar
+                other_primary_since = info.get("primary_since")
+                if other_primary_since and primary_since:
+                    if other_primary_since < primary_since:
+                        should_promote = False
+                        break
+            
+            if should_promote:
+                logger.warning(f"[{server_id}] No hay primario activo. PROMOVIENDO A PRIMARY...")
+                server_role = "primary"
+                primary_since = time.time()
+                current_primary_url = None
+                
+                # Actualizar mi entrada en cluster_state
+                if server_id in cluster_state:
+                    cluster_state[server_id]["role"] = "primary"
+                    cluster_state[server_id]["primary_since"] = primary_since
+                
+                # Notificar a otros
+                await notify_promotion()
+                
+                logger.info(f"[{server_id}] *** PROMOCIÓN COMPLETADA: Ahora soy el PRIMARY ***")
+
+
+async def notify_promotion():
+    """Notifica a otros servidores que me he promovido a primario"""
+    for sid, info in cluster_state.items():
+        if sid == server_id or not info.get("healthy"):
+            continue
+            
+        url = info.get("url")
+        if not url:
+            continue
+            
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                await client.post(f"{url}/notify-new-primary", json={
+                    "new_primary_id": server_id,
+                    "new_primary_url": f"http://{my_ip}:{dns_port}",
+                    "primary_since": primary_since,
+                    "timestamp": datetime.now().isoformat()
+                })
+                logger.info(f"[{server_id}] Notificación de promoción enviada a {sid}")
+        except Exception as e:
+            logger.error(f"[{server_id}] Error notificando a {sid}: {e}")
+
+
+# ============================================================================
+# SINCRONIZACIÓN
+# ============================================================================
+
+async def propagate_to_backups(hostname: str, ip: str):
+    """Propaga una resolución a los servidores de backup"""
+    if server_role != "primary":
+        return
+        
+    logger.debug(f"[{server_id}] Propagando '{hostname}' a backups...")
+    
+    for sid, info in cluster_state.items():
+        if sid == server_id or info.get("role") == "primary":
+            continue
+            
+        if not info.get("healthy"):
+            continue
+            
+        url = info.get("url")
+        if not url:
+            continue
+            
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                sync_data = {
+                    "cache": {hostname: dns_cache[hostname]},
+                    "timestamp": datetime.now().isoformat(),
+                    "source_id": server_id
+                }
+                response = await client.post(f"{url}/sync", json=sync_data)
+                if response.status_code == 200:
+                    logger.debug(f"[{server_id}] Propagación a {sid}: OK")
+        except Exception as e:
+            logger.error(f"[{server_id}] Error propagando a {sid}: {e}")
+
+
+async def sync_from_primary():
+    """Sincroniza el cache completo desde el primario"""
+    global current_primary_url
+    
+    if server_role == "primary" or not current_primary_url:
+        return
+        
+    try:
+        logger.info(f"[{server_id}] Sincronizando desde primario: {current_primary_url}")
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{current_primary_url}/cache")
+            if response.status_code == 200:
+                data = response.json()
+                for hostname, entry in data.get("cache", {}).items():
+                    dns_cache[hostname] = entry
+                
+                sync_status["last_sync"] = datetime.now().isoformat()
+                sync_status["sync_count"] += 1
+                
+                logger.info(f"[{server_id}] Sincronización completada. Cache: {len(dns_cache)} entradas")
+    except Exception as e:
+        logger.error(f"[{server_id}] Error en sincronización: {e}")
+
+
+# ============================================================================
+# LOOPS EN BACKGROUND
+# ============================================================================
+
+async def discovery_loop():
+    """Loop de descubrimiento periódico de servidores DNS"""
+    while True:
+        try:
+            await asyncio.sleep(DISCOVERY_INTERVAL)
+            await discover_via_dns_alias()
+        except Exception as e:
+            logger.error(f"[{server_id}] Error en discovery loop: {e}")
+
+
+async def health_check_loop():
+    """Loop de health checks y determinación de rol"""
+    while True:
+        try:
+            await asyncio.sleep(HEALTH_CHECK_INTERVAL)
+            
+            # Verificar salud de todos los servidores conocidos
+            for sid, info in list(cluster_state.items()):
+                if sid == server_id:
+                    continue
+                ip = info.get("ip")
+                if ip:
+                    await check_server_health(ip)
+            
+            # Determinar mi rol basándome en el estado actual
+            await determine_role()
+            
+        except Exception as e:
+            logger.error(f"[{server_id}] Error en health check loop: {e}")
+
+
+async def sync_loop():
+    """Loop de sincronización periódica (solo backups)"""
+    while True:
+        try:
+            await asyncio.sleep(SYNC_INTERVAL)
+            
+            if server_role == "backup" and current_primary_url:
+                if not sync_status["is_syncing"]:
+                    sync_status["is_syncing"] = True
+                    await sync_from_primary()
+                    sync_status["is_syncing"] = False
+        except Exception as e:
+            logger.error(f"[{server_id}] Error en sync loop: {e}")
+            sync_status["is_syncing"] = False
+
+
+# ============================================================================
+# STARTUP
+# ============================================================================
+
+@app.on_event("startup")
+async def startup_event():
+    """Inicialización del servicio DNS HA"""
+    global my_ip, my_hostname, server_role, primary_since
+    
+    logger.info(f"[{server_id}] ========================================")
+    logger.info(f"[{server_id}] Iniciando DNS Service HA v2.1")
+    logger.info(f"[{server_id}] Server ID: {server_id}")
+    logger.info(f"[{server_id}] DNS Alias: {DNS_ALIAS}")
+    logger.info(f"[{server_id}] Puerto: {dns_port}")
+    logger.info(f"[{server_id}] Health Check Interval: {HEALTH_CHECK_INTERVAL}s")
+    logger.info(f"[{server_id}] Discovery Interval: {DISCOVERY_INTERVAL}s")
+    logger.info(f"[{server_id}] Sync Interval: {SYNC_INTERVAL}s")
+    logger.info(f"[{server_id}] ========================================")
+    
+    # Obtener mi IP
+    my_ip = get_my_ip()
+    my_hostname = socket.gethostname()
+    logger.info(f"[{server_id}] Mi IP: {my_ip}, Hostname: {my_hostname}")
+    
+    # Registrarme a mí mismo en el cluster_state
+    cluster_state[server_id] = {
+        "url": f"http://{my_ip}:{dns_port}",
+        "ip": my_ip,
+        "hostname": my_hostname,
+        "healthy": True,
+        "role": "unknown",
+        "primary_since": None,
+        "last_seen": datetime.now().isoformat()
+    }
+    known_dns_ips.add(my_ip)
+    
+    # Esperar un poco para que Docker DNS esté listo
+    await asyncio.sleep(2)
+    
+    # Descubrir otros servidores
+    await discover_via_dns_alias()
+    
+    # Determinar rol inicial
+    await determine_role()
+    
+    # Actualizar mi rol en cluster_state
+    cluster_state[server_id]["role"] = server_role
+    cluster_state[server_id]["primary_since"] = primary_since
+    
+    # Iniciar loops en background
+    asyncio.create_task(discovery_loop())
+    asyncio.create_task(health_check_loop())
+    asyncio.create_task(sync_loop())
+    
+    logger.info(f"[{server_id}] DNS Service HA iniciado. Rol: {server_role}")
+
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("DNS_PORT", 5353))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=dns_port)
