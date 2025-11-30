@@ -36,6 +36,8 @@ services:
     depends_on:
       - server
       - dns_service
+    ports:
+      - "8501:8501"
     environment:
       # Variables para el descubrimiento de servicios
       - DNS_SERVICE_HOST=dns_service
@@ -63,13 +65,4 @@ services:
       - BROWSER_API_URL=http://localhost:8000
     restart: unless-stopped
 
-  client_router:
-    build:
-      context: app/client_router
-      dockerfile: Dockerfile
-    depends_on:
-      - client_primary
-      - client_backup
-    ports:
-      - "8501:8501"
-    restart: unless-stopped
+  
