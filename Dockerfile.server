@@ -11,10 +11,10 @@ COPY app/__init__.py /app/__init__.py
 COPY app/main.py /app/main.py
 COPY app/server /app/server
 
-# Crear directorios internos
-RUN mkdir -p /app/files /app/logs /tmp/source_files
+# Crear directorios internos (datos y archivos viven dentro del contenedor)
+RUN mkdir -p /app/files /app/logs /app/data /tmp/source_files
 
-# Los logs sí se mantienen como volumen persistente
+# Solo los logs se exponen como volumen persistente
 VOLUME ["/app/logs"]
 
 # Copiar y dar permisos al script de entrada
@@ -24,6 +24,7 @@ RUN chmod +x /app/entrypoint.sh
 ENV PYTHONPATH=/app
 ENV FILES_ROOT=/app/files
 ENV FILES_SOURCE_PATH=/tmp/source_files
+ENV DB_PATH=/app/data/doc_search.db
 
 EXPOSE 8000
 

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 from urllib.parse import urljoin
 
 import importlib
@@ -58,35 +59,89 @@ except ModuleNotFoundError:
     )
 
 # --- Configuración de Servicio ---
-DNS_SERVICE_HOST = os.getenv("DNS_SERVICE_HOST", "dns_service")
+DNS_ALIAS = os.getenv("DNS_ALIAS", "dns")
+DNS_SERVICE_PORT = int(os.getenv("DNS_SERVICE_PORT", 5353))
 TARGET_SERVICE_NAME = os.getenv("TARGET_SERVICE_NAME", "server")
 TARGET_SERVICE_PORT = os.getenv("TARGET_SERVICE_PORT", "8000")
 DEFAULT_PAGE_SIZE = int(os.getenv("CLIENT_PAGE_SIZE", "10"))
 DEFAULT_TYPE = "Todos"
 
-# Inicializar el resolvedor DNS una sola vez
-resolver = None
-if DNSClient:
+# Configuración de reintentos
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
+RETRY_DELAY = float(os.getenv("RETRY_DELAY", 0.5))
+
+# Cache de la URL del servidor
+_cached_server_url: Optional[str] = None
+_cache_timestamp: float = 0
+_cache_ttl: float = 30  # TTL del cache en segundos
+
+
+def _discover_dns_url() -> Optional[str]:
+    """Descubre la URL de un servidor DNS usando el alias de Docker."""
+    import socket
     try:
-        resolver = DNSClient(dns_host=DNS_SERVICE_HOST)
-        logger.info("DNSClient inicializado correctamente.")
+        results = socket.getaddrinfo(DNS_ALIAS, DNS_SERVICE_PORT, socket.AF_INET, socket.SOCK_STREAM)
+        ips = sorted(set(result[4][0] for result in results))  # Ordenar para consistencia
+        if ips:
+            return f"http://{ips[0]}:{DNS_SERVICE_PORT}"
     except Exception as e:
-        logger.error(f"Error inicializando DNSClient: {e}")
+        logger.warning(f"Error descubriendo DNS: {e}")
+    return None
+
+
+def _resolve_server_from_dns() -> Optional[str]:
+    """
+    Pregunta al DNS por el servidor API PRIMARY actual.
+    Usa el endpoint /server/resolve.
+    """
+    global _cached_server_url, _cache_timestamp
+    
+    # Verificar cache
+    if _cached_server_url and (time.time() - _cache_timestamp) < _cache_ttl:
+        return _cached_server_url
+    
+    dns_url = _discover_dns_url()
+    if not dns_url:
+        logger.warning("No se pudo descubrir el DNS")
+        return None
+    
+    try:
+        response = requests.get(f"{dns_url}/server/resolve", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            server_url = data.get("url")
+            if server_url:
+                _cached_server_url = server_url
+                _cache_timestamp = time.time()
+                logger.info(f"Servidor resuelto via DNS: {server_url}")
+                return server_url
+        elif response.status_code == 503:
+            logger.warning("DNS reporta que no hay servidores disponibles")
+    except Exception as e:
+        logger.error(f"Error consultando DNS: {e}")
+    
+    return None
+
+
+def _invalidate_server_cache():
+    """Invalida el cache del servidor para forzar re-resolución."""
+    global _cached_server_url, _cache_timestamp
+    _cached_server_url = None
+    _cache_timestamp = 0
+    logger.info("Cache de servidor invalidado")
+
 
 def get_api_base_url() -> str:
     """
     Obtiene la URL base del servidor API.
-    Intenta resolver la IP dinámicamente usando el servicio DNS personalizado.
+    Primero intenta resolver via el DNS, luego usa fallback.
     """
-    if resolver:
-        try:
-            # Paso clave: Preguntar al DNS Service dónde está el 'server'
-            server_ip = resolver.resolve(TARGET_SERVICE_NAME)
-            return f"http://{server_ip}:{TARGET_SERVICE_PORT}"
-        except Exception as e:
-            logger.error(f"Fallo en resolución DNS para '{TARGET_SERVICE_NAME}': {e}")
+    # Intentar resolver via DNS
+    server_url = _resolve_server_from_dns()
+    if server_url:
+        return server_url
     
-    # Fallback: Usar variable de entorno o localhost si falla el DNS
+    # Fallback: Usar variable de entorno o localhost
     fallback = os.getenv("API_BASE_URL", "http://localhost:8000")
     logger.warning(f"Usando URL de fallback: {fallback}")
     return fallback
@@ -104,14 +159,52 @@ def build_download_url(record: Dict) -> str:
     return urljoin(browser_url.rstrip("/") + "/", f"files/{record['file_id']}/download")
 
 
+def make_request_with_retry(method: str, path: str, **kwargs) -> requests.Response:
+    """
+    Realiza una petición HTTP con reintentos y re-resolución de DNS en caso de fallo.
+    
+    Si la petición falla (conexión rechazada, timeout, etc.), invalida el cache
+    del servidor y reintenta con una nueva resolución DNS.
+    """
+    last_exception = None
+    
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            url = api_url(path)
+            logger.debug(f"Intento {attempt}: {method} {url}")
+            
+            if method.upper() == "GET":
+                response = requests.get(url, timeout=15, **kwargs)
+            elif method.upper() == "POST":
+                response = requests.post(url, timeout=15, **kwargs)
+            else:
+                raise ValueError(f"Método no soportado: {method}")
+            
+            response.raise_for_status()
+            return response
+            
+        except (requests.ConnectionError, requests.Timeout) as e:
+            logger.warning(f"Intento {attempt} falló: {e}")
+            last_exception = e
+            
+            # Invalidar cache y forzar re-resolución en el siguiente intento
+            _invalidate_server_cache()
+            
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY)
+        except requests.HTTPError as e:
+            # Errores HTTP (4xx, 5xx) no se reintentan
+            raise
+    
+    # Agotados los reintentos
+    logger.error(f"Todos los reintentos fallaron. Última excepción: {last_exception}")
+    raise last_exception
+
+
 @st.cache_data(ttl=10)
 def fetch_files(query: str, *, limit: int, offset: int) -> List[Dict]:
-    target_url = api_url("search")
-    logger.info(f"Realizando petición a: {target_url}")
-    
     params = {"query": query, "limit": limit, "offset": offset}
-    response = requests.get(target_url, params=params, timeout=15)
-    response.raise_for_status()
+    response = make_request_with_retry("GET", "search", params=params)
     return response.json()
 
 

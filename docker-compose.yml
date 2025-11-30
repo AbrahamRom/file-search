@@ -21,6 +21,7 @@ services:
       - HEALTH_CHECK_INTERVAL=5
       - SYNC_INTERVAL=30
       - DISCOVERY_INTERVAL=15
+      - API_SERVER_TIMEOUT=15
     volumes:
       - ./runtime/logs:/app/logs
     restart: unless-stopped
@@ -51,6 +52,7 @@ services:
       - HEALTH_CHECK_INTERVAL=5
       - SYNC_INTERVAL=30
       - DISCOVERY_INTERVAL=15
+      - API_SERVER_TIMEOUT=15
     volumes:
       - ./runtime/logs:/app/logs
     restart: unless-stopped
@@ -83,6 +85,7 @@ services:
       - HEALTH_CHECK_INTERVAL=5
       - SYNC_INTERVAL=30
       - DISCOVERY_INTERVAL=15
+      - API_SERVER_TIMEOUT=15
     volumes:
       - ./runtime/logs:/app/logs
     restart: unless-stopped
@@ -101,35 +104,107 @@ services:
       start_period: 10s
 
   # ============================================================================
-  # SERVIDOR API
-  # Los archivos se COPIAN dentro del contenedor al inicio
-  # Los logs permanecen como volumen persistente
+  # SERVIDORES API CON ALTA DISPONIBILIDAD
+  # 1 PRIMARY + 2 BACKUPs
+  # Los BACKUPs sincronizan datos del PRIMARY cada 10 segundos
   # ============================================================================
-  server:
+  
+  # Servidor API 1 (será PRIMARY al iniciar primero)
+  server_1:
     build:
       context: .
       dockerfile: Dockerfile.server
     ports:
       - "8000:8000"
     environment:
+      - SERVER_ID=server_1
+      - SERVER_PORT=8000
       - FILES_ROOT=/app/files
       - FILES_SOURCE_PATH=/tmp/source_files
       - LOG_DIR=/app/logs
-      # Alias DNS para descubrimiento dinámico
+      - DB_PATH=/app/data/doc_search.db
+      # Configuración DNS
       - DNS_ALIAS=dns
       - DNS_SERVICE_PORT=5353
+      # Configuración de sincronización
+      - HEARTBEAT_INTERVAL=5
+      - SYNC_INTERVAL=10
     volumes:
-      # Montaje temporal de solo lectura para copiar archivos al inicio
+      # Archivos fuente (solo lectura, se copian al inicio)
       - ${FILES_SOURCE:-./runtime/files}:/tmp/source_files:ro
-      # Los logs SÍ se mantienen como volumen persistente
+      # Logs compartidos
       - ./runtime/logs:/app/logs
     depends_on:
       dns_1:
         condition: service_healthy
-      dns_2:
+    restart: unless-stopped
+    networks:
+      - app_network
+
+  # Servidor API 2 (será BACKUP)
+  server_2:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "8001:8000"
+    environment:
+      - SERVER_ID=server_2
+      - SERVER_PORT=8000
+      - FILES_ROOT=/app/files
+      - FILES_SOURCE_PATH=/tmp/source_files
+      - LOG_DIR=/app/logs
+      - DB_PATH=/app/data/doc_search.db
+      # Configuración DNS
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      # Configuración de sincronización
+      - HEARTBEAT_INTERVAL=5
+      - SYNC_INTERVAL=10
+    volumes:
+      # Archivos fuente (solo lectura, se copian al inicio)
+      - ${FILES_SOURCE:-./runtime/files}:/tmp/source_files:ro
+      # Logs compartidos
+      - ./runtime/logs:/app/logs
+    depends_on:
+      dns_1:
         condition: service_healthy
-      dns_3:
+      server_1:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - app_network
+
+  # Servidor API 3 (será BACKUP)
+  server_3:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "8002:8000"
+    environment:
+      - SERVER_ID=server_3
+      - SERVER_PORT=8000
+      - FILES_ROOT=/app/files
+      - FILES_SOURCE_PATH=/tmp/source_files
+      - LOG_DIR=/app/logs
+      - DB_PATH=/app/data/doc_search.db
+      # Configuración DNS
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      # Configuración de sincronización
+      - HEARTBEAT_INTERVAL=5
+      - SYNC_INTERVAL=10
+    volumes:
+      # Archivos fuente (solo lectura, se copian al inicio)
+      - ${FILES_SOURCE:-./runtime/files}:/tmp/source_files:ro
+      # Logs compartidos
+      - ./runtime/logs:/app/logs
+    depends_on:
+      dns_1:
         condition: service_healthy
+      server_1:
+        condition: service_started
     restart: unless-stopped
     networks:
       - app_network
@@ -142,7 +217,7 @@ services:
       context: .
       dockerfile: Dockerfile.client
     depends_on:
-      server:
+      server_1:
         condition: service_started
       dns_1:
         condition: service_healthy
@@ -154,8 +229,11 @@ services:
       - TARGET_SERVICE_NAME=server
       - TARGET_SERVICE_PORT=8000
       # Fallback y configuración de navegador
-      - API_BASE_URL=http://server:8000
+      - API_BASE_URL=http://server_1:8000
       - BROWSER_API_URL=http://localhost:8000
+      # Configuración de reintentos
+      - MAX_RETRIES=3
+      - RETRY_DELAY=0.5
     ports:
       - "8501:8501"
     restart: unless-stopped

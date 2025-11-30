@@ -2,6 +2,8 @@ import importlib
 import logging
 import os
 import shutil
+import sqlite3
+import tempfile
 from datetime import datetime
 from typing import List, Optional
 from pathlib import Path
@@ -19,13 +21,15 @@ Query = fastapi.Query
 Request = fastapi.Request
 HTTPException = fastapi.HTTPException
 FileResponse = fastapi.responses.FileResponse
+StreamingResponse = fastapi.responses.StreamingResponse
+BackgroundTasks = fastapi.BackgroundTasks
 BaseModel = pydantic.BaseModel
 UploadFile = fastapi.UploadFile
 File = fastapi.File
 Form = fastapi.Form
 
 from ..db.crud import delete_file, list_files, search_files, upsert_file
-from ..db.db import init_db
+from ..db.db import init_db, DB_PATH
 from ..services.scanner import sync, _DEFAULT_ROOT, _compute_file_id
 from ..services import file_handler
 
@@ -192,3 +196,132 @@ def search_files_endpoint(
     )
     access_logger.info(access_message)
     return results
+
+
+# ============================================================================
+# ENDPOINTS INTERNOS PARA SINCRONIZACIÓN
+# Solo usados por servidores BACKUP para sincronizar desde el PRIMARY
+# ============================================================================
+
+@app.get("/internal/db_snapshot")
+def get_db_snapshot(request: Request, background_tasks: BackgroundTasks):
+    """
+    Genera y retorna un snapshot consistente de la base de datos SQLite.
+    Usa la API de backup de SQLite para garantizar consistencia.
+    """
+    client_host = request.client.host if request.client else "-"
+    logger.info(f"[SYNC] Solicitud de snapshot de DB desde {client_host}")
+    
+    try:
+        # Crear archivo temporal para el backup
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp:
+            tmp_path = tmp.name
+        
+        # Usar la API de backup de SQLite para crear una copia consistente
+        source_conn = sqlite3.connect(str(DB_PATH))
+        dest_conn = sqlite3.connect(tmp_path)
+        
+        with dest_conn:
+            source_conn.backup(dest_conn)
+        
+        source_conn.close()
+        dest_conn.close()
+        
+        # Retornar el archivo
+        file_size = os.path.getsize(tmp_path)
+        logger.info(f"[SYNC] Snapshot de DB generado: {file_size / 1024:.2f} KB")
+        
+        def cleanup():
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+        
+        # Programar limpieza después de enviar la respuesta
+        background_tasks.add_task(cleanup)
+        
+        return FileResponse(
+            path=tmp_path,
+            filename="db_snapshot.db",
+            media_type="application/octet-stream"
+        )
+        
+    except Exception as e:
+        logger.error(f"[SYNC] Error generando snapshot de DB: {e}")
+        raise HTTPException(status_code=500, detail=f"Error generando snapshot: {str(e)}")
+
+
+@app.get("/internal/files")
+def list_files_for_sync(request: Request):
+    """
+    Lista todos los archivos disponibles para sincronización.
+    Incluye metadatos necesarios para determinar si un archivo necesita actualizarse.
+    """
+    client_host = request.client.host if request.client else "-"
+    logger.info(f"[SYNC] Solicitud de lista de archivos desde {client_host}")
+    
+    files = []
+    
+    try:
+        if _DEFAULT_ROOT.exists():
+            for file_path in _DEFAULT_ROOT.rglob("*"):
+                if not file_path.is_file():
+                    continue
+                
+                relative_path = file_path.relative_to(_DEFAULT_ROOT).as_posix()
+                stat = file_path.stat()
+                
+                files.append({
+                    "relative_path": relative_path,
+                    "size": stat.st_size,
+                    "last_modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+                })
+        
+        logger.info(f"[SYNC] Lista de archivos generada: {len(files)} archivos")
+        
+        return {
+            "files": files,
+            "total": len(files),
+            "root": str(_DEFAULT_ROOT)
+        }
+        
+    except Exception as e:
+        logger.error(f"[SYNC] Error listando archivos: {e}")
+        raise HTTPException(status_code=500, detail=f"Error listando archivos: {str(e)}")
+
+
+@app.get("/internal/file/{file_path:path}")
+def get_file_for_sync(file_path: str, request: Request):
+    """
+    Descarga un archivo específico para sincronización.
+    El path es relativo al directorio de archivos.
+    """
+    client_host = request.client.host if request.client else "-"
+    logger.info(f"[SYNC] Solicitud de archivo '{file_path}' desde {client_host}")
+    
+    try:
+        full_path = _DEFAULT_ROOT / file_path
+        
+        # Verificar que el archivo existe y está dentro del directorio permitido
+        if not full_path.exists():
+            raise HTTPException(status_code=404, detail="Archivo no encontrado")
+        
+        # Seguridad: verificar que no se sale del directorio raíz
+        try:
+            full_path.resolve().relative_to(_DEFAULT_ROOT.resolve())
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Acceso denegado")
+        
+        logger.info(f"[SYNC] Enviando archivo: {file_path} ({full_path.stat().st_size} bytes)")
+        
+        return FileResponse(
+            path=str(full_path),
+            filename=full_path.name,
+            media_type="application/octet-stream"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[SYNC] Error enviando archivo {file_path}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")

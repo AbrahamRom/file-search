@@ -19,6 +19,7 @@ services:
       - HEALTH_CHECK_INTERVAL=5
       - SYNC_INTERVAL=30
       - DISCOVERY_INTERVAL=15
+      - API_SERVER_TIMEOUT=15
     volumes:
       - type: bind
         source: ${LOGS_SOURCE:-/srv/file-search/logs}
@@ -53,6 +54,7 @@ services:
       - HEALTH_CHECK_INTERVAL=5
       - SYNC_INTERVAL=30
       - DISCOVERY_INTERVAL=15
+      - API_SERVER_TIMEOUT=15
     volumes:
       - type: bind
         source: ${LOGS_SOURCE:-/srv/file-search/logs}
@@ -87,6 +89,7 @@ services:
       - HEALTH_CHECK_INTERVAL=5
       - SYNC_INTERVAL=30
       - DISCOVERY_INTERVAL=15
+      - API_SERVER_TIMEOUT=15
     volumes:
       - type: bind
         source: ${LOGS_SOURCE:-/srv/file-search/logs}
@@ -110,26 +113,34 @@ services:
         mode: ingress
 
   # ============================================================================
-  # SERVIDOR API
-  # Los archivos se COPIAN dentro del contenedor al inicio
-  # Los logs permanecen como volumen persistente
+  # SERVIDORES API CON ALTA DISPONIBILIDAD
+  # 1 PRIMARY + 2 BACKUPs gestionados por el DNS
+  # Los BACKUPs sincronizan datos del PRIMARY cada 10 segundos
   # ============================================================================
-  server:
+
+  # Servidor API 1 (será PRIMARY al iniciar primero)
+  server_1:
     image: file-search-api:latest
     environment:
+      - SERVER_ID=server_1
+      - SERVER_PORT=8000
       - FILES_ROOT=/app/files
       - FILES_SOURCE_PATH=/tmp/source_files
       - LOG_DIR=/app/logs
-      # Alias DNS para descubrimiento dinámico
+      - DB_PATH=/app/data/doc_search.db
+      # Configuración DNS
       - DNS_ALIAS=dns
       - DNS_SERVICE_PORT=5353
+      # Configuración de sincronización
+      - HEARTBEAT_INTERVAL=5
+      - SYNC_INTERVAL=10
     volumes:
       # Montaje temporal de solo lectura para copiar archivos al inicio
       - type: bind
         source: ${FILES_SOURCE:-/srv/file-search/files}
         target: /tmp/source_files
         read_only: true
-      # Los logs SÍ se mantienen como volumen persistente
+      # Los logs se mantienen como volumen persistente
       - type: bind
         source: ${LOGS_SOURCE:-/srv/file-search/logs}
         target: /app/logs
@@ -149,6 +160,86 @@ services:
         published: 8000
         mode: ingress
 
+  # Servidor API 2 (BACKUP)
+  server_2:
+    image: file-search-api:latest
+    environment:
+      - SERVER_ID=server_2
+      - SERVER_PORT=8000
+      - FILES_ROOT=/app/files
+      - FILES_SOURCE_PATH=/tmp/source_files
+      - LOG_DIR=/app/logs
+      - DB_PATH=/app/data/doc_search.db
+      # Configuración DNS
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      # Configuración de sincronización
+      - HEARTBEAT_INTERVAL=5
+      - SYNC_INTERVAL=10
+    volumes:
+      - type: bind
+        source: ${FILES_SOURCE:-/srv/file-search/files}
+        target: /tmp/source_files
+        read_only: true
+      - type: bind
+        source: ${LOGS_SOURCE:-/srv/file-search/logs}
+        target: /app/logs
+    networks:
+      - file_search_net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == worker
+    ports:
+      - target: 8000
+        published: 8001
+        mode: ingress
+
+  # Servidor API 3 (BACKUP)
+  server_3:
+    image: file-search-api:latest
+    environment:
+      - SERVER_ID=server_3
+      - SERVER_PORT=8000
+      - FILES_ROOT=/app/files
+      - FILES_SOURCE_PATH=/tmp/source_files
+      - LOG_DIR=/app/logs
+      - DB_PATH=/app/data/doc_search.db
+      # Configuración DNS
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      # Configuración de sincronización
+      - HEARTBEAT_INTERVAL=5
+      - SYNC_INTERVAL=10
+    volumes:
+      - type: bind
+        source: ${FILES_SOURCE:-/srv/file-search/files}
+        target: /tmp/source_files
+        read_only: true
+      - type: bind
+        source: ${LOGS_SOURCE:-/srv/file-search/logs}
+        target: /app/logs
+    networks:
+      - file_search_net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == worker
+    ports:
+      - target: 8000
+        published: 8002
+        mode: ingress
+
   # ============================================================================
   # CLIENTE WEB
   # ============================================================================
@@ -162,8 +253,11 @@ services:
       - TARGET_SERVICE_NAME=server
       - TARGET_SERVICE_PORT=8000
       # Fallback y configuración de navegador
-      - API_BASE_URL=http://server:8000
+      - API_BASE_URL=http://server_1:8000
       - BROWSER_API_URL=${BROWSER_API_URL:-http://localhost:8000}
+      # Configuración de reintentos
+      - MAX_RETRIES=3
+      - RETRY_DELAY=0.5
     networks:
       - file_search_net
     deploy:

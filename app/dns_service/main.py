@@ -14,7 +14,7 @@ from .logging_config import configure_logging
 configure_logging()
 logger = logging.getLogger("dns_service")
 
-app = FastAPI(title="Internal DNS Service HA", version="2.1.0")
+app = FastAPI(title="Internal DNS Service HA", version="3.0.0")
 
 # ============================================================================
 # CONFIGURACIÓN DEL SERVIDOR
@@ -69,6 +69,20 @@ my_ip: Optional[str] = None
 my_hostname: Optional[str] = None
 
 start_time = time.time()
+
+# ============================================================================
+# GESTIÓN DE SERVIDORES API (file-search servers)
+# ============================================================================
+
+# Estado de los servidores API registrados
+# {server_id: {ip, port, role, last_heartbeat, registered_at}}
+api_servers: Dict[str, dict] = {}
+
+# Timeout para considerar un servidor API como caído (en segundos)
+API_SERVER_TIMEOUT = int(os.getenv("API_SERVER_TIMEOUT", 15))
+
+# Lock para operaciones atómicas en api_servers
+api_servers_lock = asyncio.Lock()
 
 
 # ============================================================================
@@ -136,6 +150,39 @@ class RegisterRequest(BaseModel):
     hostname: str
     role: str
     primary_since: Optional[float] = None
+
+
+# ============================================================================
+# MODELOS PARA SERVIDORES API
+# ============================================================================
+
+class APIServerRegisterRequest(BaseModel):
+    server_id: str
+    ip: str
+    port: int = 8000
+
+
+class APIServerHeartbeatRequest(BaseModel):
+    server_id: str
+    current_role: str
+
+
+class APIServerInfo(BaseModel):
+    server_id: str
+    ip: str
+    port: int
+    role: str
+    last_heartbeat: str
+    registered_at: str
+    url: str
+
+
+class APIServerResolveResponse(BaseModel):
+    server_id: str
+    ip: str
+    port: int
+    role: str
+    url: str
 
 
 # ============================================================================
@@ -317,6 +364,232 @@ async def register_dns_server(request: RegisterRequest):
         "primary_since": primary_since,
         "cluster_size": len(cluster_state)
     }
+
+
+# ============================================================================
+# ENDPOINTS PARA SERVIDORES API (file-search servers)
+# ============================================================================
+
+@app.post("/server/register")
+async def register_api_server(request: APIServerRegisterRequest):
+    """
+    Registra un servidor API y le asigna un rol (PRIMARY o BACKUP).
+    El primer servidor en registrarse es el PRIMARY.
+    """
+    async with api_servers_lock:
+        now = datetime.now().isoformat()
+        
+        # Verificar si ya hay un PRIMARY activo
+        current_primary = None
+        for sid, info in api_servers.items():
+            if info["role"] == "PRIMARY":
+                # Verificar si el PRIMARY está vivo
+                last_hb = datetime.fromisoformat(info["last_heartbeat"])
+                elapsed = (datetime.now() - last_hb).total_seconds()
+                if elapsed < API_SERVER_TIMEOUT:
+                    current_primary = sid
+                    break
+        
+        # Asignar rol
+        if current_primary is None:
+            assigned_role = "PRIMARY"
+            logger.info(f"[{server_id}] Servidor API {request.server_id} registrado como PRIMARY")
+        else:
+            assigned_role = "BACKUP"
+            logger.info(f"[{server_id}] Servidor API {request.server_id} registrado como BACKUP (PRIMARY: {current_primary})")
+        
+        # Registrar servidor
+        api_servers[request.server_id] = {
+            "ip": request.ip,
+            "port": request.port,
+            "role": assigned_role,
+            "last_heartbeat": now,
+            "registered_at": now
+        }
+        
+        # Obtener info del PRIMARY actual para que los backups sepan a quién sincronizar
+        primary_info = None
+        if assigned_role == "BACKUP" and current_primary:
+            p = api_servers[current_primary]
+            primary_info = {
+                "server_id": current_primary,
+                "ip": p["ip"],
+                "port": p["port"],
+                "url": f"http://{p['ip']}:{p['port']}"
+            }
+        
+        return {
+            "status": "registered",
+            "assigned_role": assigned_role,
+            "server_id": request.server_id,
+            "primary_info": primary_info,
+            "total_servers": len(api_servers)
+        }
+
+
+@app.post("/server/heartbeat")
+async def api_server_heartbeat(request: APIServerHeartbeatRequest):
+    """
+    Recibe heartbeat de un servidor API y verifica/actualiza su rol.
+    Maneja la promoción de BACKUPs a PRIMARY si es necesario.
+    """
+    async with api_servers_lock:
+        if request.server_id not in api_servers:
+            raise HTTPException(status_code=404, detail="Servidor no registrado")
+        
+        now = datetime.now()
+        now_iso = now.isoformat()
+        
+        # Verificar estado del PRIMARY actual
+        current_primary = None
+        primary_alive = False
+        
+        for sid, info in api_servers.items():
+            if info["role"] == "PRIMARY":
+                current_primary = sid
+                last_hb = datetime.fromisoformat(info["last_heartbeat"])
+                elapsed = (now - last_hb).total_seconds()
+                primary_alive = elapsed < API_SERVER_TIMEOUT
+                break
+        
+        # Actualizar heartbeat del servidor que envía
+        api_servers[request.server_id]["last_heartbeat"] = now_iso
+        
+        assigned_role = api_servers[request.server_id]["role"]
+        primary_info = None
+        
+        # Si no hay PRIMARY o el PRIMARY está caído, promover
+        if not primary_alive:
+            if request.current_role == "BACKUP" or current_primary == request.server_id:
+                # El servidor que reporta puede ser promovido
+                # O el PRIMARY actual está reportando pero antes estaba caído
+                
+                # Elegir el BACKUP más antiguo para promover
+                oldest_backup = None
+                oldest_time = None
+                
+                for sid, info in api_servers.items():
+                    if info["role"] == "BACKUP":
+                        last_hb = datetime.fromisoformat(info["last_heartbeat"])
+                        elapsed = (now - last_hb).total_seconds()
+                        if elapsed < API_SERVER_TIMEOUT:
+                            reg_time = datetime.fromisoformat(info["registered_at"])
+                            if oldest_time is None or reg_time < oldest_time:
+                                oldest_backup = sid
+                                oldest_time = reg_time
+                
+                if current_primary and not primary_alive:
+                    # Marcar el PRIMARY anterior como BACKUP (está caído pero por si vuelve)
+                    logger.warning(f"[{server_id}] PRIMARY {current_primary} no responde. Timeout: {API_SERVER_TIMEOUT}s")
+                    api_servers[current_primary]["role"] = "BACKUP"
+                
+                if oldest_backup:
+                    # Promover el backup más antiguo
+                    api_servers[oldest_backup]["role"] = "PRIMARY"
+                    logger.warning(f"[{server_id}] *** FAILOVER: Promoviendo {oldest_backup} a PRIMARY ***")
+                    
+                    if request.server_id == oldest_backup:
+                        assigned_role = "PRIMARY"
+                elif request.server_id == current_primary:
+                    # El PRIMARY vuelve a estar activo
+                    assigned_role = "PRIMARY"
+                    api_servers[request.server_id]["role"] = "PRIMARY"
+        
+        # Si soy BACKUP, obtener info del PRIMARY
+        if assigned_role == "BACKUP":
+            for sid, info in api_servers.items():
+                if info["role"] == "PRIMARY":
+                    primary_info = {
+                        "server_id": sid,
+                        "ip": info["ip"],
+                        "port": info["port"],
+                        "url": f"http://{info['ip']}:{info['port']}"
+                    }
+                    break
+        
+        return {
+            "status": "ok",
+            "assigned_role": assigned_role,
+            "primary_info": primary_info,
+            "timestamp": now_iso
+        }
+
+
+@app.get("/server/resolve", response_model=APIServerResolveResponse)
+async def resolve_api_server():
+    """
+    Resuelve la IP del servidor API PRIMARY actual.
+    Usado por los clientes para saber a qué servidor conectarse.
+    """
+    async with api_servers_lock:
+        now = datetime.now()
+        
+        # Buscar el PRIMARY activo
+        for sid, info in api_servers.items():
+            if info["role"] == "PRIMARY":
+                last_hb = datetime.fromisoformat(info["last_heartbeat"])
+                elapsed = (now - last_hb).total_seconds()
+                
+                if elapsed < API_SERVER_TIMEOUT:
+                    logger.info(f"[{server_id}] Resolución de servidor API -> {sid} ({info['ip']})")
+                    return APIServerResolveResponse(
+                        server_id=sid,
+                        ip=info["ip"],
+                        port=info["port"],
+                        role="PRIMARY",
+                        url=f"http://{info['ip']}:{info['port']}"
+                    )
+        
+        # No hay PRIMARY activo, buscar un BACKUP vivo
+        for sid, info in api_servers.items():
+            last_hb = datetime.fromisoformat(info["last_heartbeat"])
+            elapsed = (now - last_hb).total_seconds()
+            
+            if elapsed < API_SERVER_TIMEOUT:
+                # Promover este BACKUP a PRIMARY
+                api_servers[sid]["role"] = "PRIMARY"
+                logger.warning(f"[{server_id}] No hay PRIMARY. Promoviendo {sid} a PRIMARY en resolución")
+                
+                return APIServerResolveResponse(
+                    server_id=sid,
+                    ip=info["ip"],
+                    port=info["port"],
+                    role="PRIMARY",
+                    url=f"http://{info['ip']}:{info['port']}"
+                )
+        
+        logger.error(f"[{server_id}] No hay servidores API disponibles")
+        raise HTTPException(status_code=503, detail="No hay servidores API disponibles")
+
+
+@app.get("/server/list")
+async def list_api_servers():
+    """Lista todos los servidores API registrados con su estado."""
+    async with api_servers_lock:
+        now = datetime.now()
+        servers = []
+        
+        for sid, info in api_servers.items():
+            last_hb = datetime.fromisoformat(info["last_heartbeat"])
+            elapsed = (now - last_hb).total_seconds()
+            
+            servers.append({
+                "server_id": sid,
+                "ip": info["ip"],
+                "port": info["port"],
+                "role": info["role"],
+                "last_heartbeat": info["last_heartbeat"],
+                "registered_at": info["registered_at"],
+                "url": f"http://{info['ip']}:{info['port']}",
+                "alive": elapsed < API_SERVER_TIMEOUT,
+                "seconds_since_heartbeat": int(elapsed)
+            })
+        
+        return {
+            "servers": servers,
+            "total": len(servers),
+            "timestamp": now.isoformat()
+        }
 
 
 @app.post("/notify-new-primary")
