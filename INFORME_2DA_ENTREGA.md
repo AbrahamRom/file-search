@@ -20,33 +20,48 @@
 
 ### 1.1 Organización del Sistema Distribuido
 
-El sistema **File Search** está diseñado siguiendo una arquitectura de **microservicios** desplegada sobre una infraestructura Docker Swarm. La arquitectura se organiza en tres capas principales:
+El sistema **File Search** está diseñado siguiendo una arquitectura de **microservicios con alta disponibilidad** desplegada sobre una infraestructura Docker Swarm. La arquitectura implementa un modelo **PRIMARY-BACKUP** con failover automático, organizada en tres capas principales:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        CAPA DE CLIENTE                          │
 │  ┌─────────────────────────────────────────────────────────┐   │
 │  │              Client (Streamlit - 8501)                   │   │
-│  │         Interfaz web para búsqueda de archivos           │   │
+│  │     Interfaz web con resolución DNS y reintentos         │   │
 │  └─────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                     CAPA DE SERVICIOS                           │
-│  ┌─────────────────────┐     ┌─────────────────────────────┐   │
-│  │   DNS Service       │◀───▶│      Server (FastAPI)       │   │
-│  │   (Port 5353)       │     │       (Port 8000)           │   │
-│  └─────────────────────┘     └─────────────────────────────┘   │
+│                 CAPA DE SERVICIOS (HA)                          │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │              DNS Service Cluster (3 nodos)               │   │
+│  │      dns_1 (PRIMARY) ◀──▶ dns_2, dns_3 (BACKUP)         │   │
+│  │                   Puerto: 5353                           │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                              │                                  │
+│                    Coordinación de roles                        │
+│                              ▼                                  │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │             API Server Cluster (3 nodos)                 │   │
+│  │   server_1 (PRIMARY) ◀──▶ server_2, server_3 (BACKUP)   │   │
+│  │              Puertos: 8000, 8001, 8002                   │   │
+│  └─────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                      CAPA DE DATOS                              │
-│  ┌─────────────────────┐     ┌─────────────────────────────┐   │
-│  │      SQLite DB      │     │     Files Volume            │   │
-│  │  (Metadatos)        │     │   (Almacenamiento)          │   │
-│  └─────────────────────┘     └─────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │    Datos internos por contenedor (sin volúmenes)         │   │
+│  │  ┌───────────┐  ┌───────────┐  ┌───────────┐            │   │
+│  │  │ Server 1  │  │ Server 2  │  │ Server 3  │            │   │
+│  │  │ SQLite+   │◀─│ SQLite+   │◀─│ SQLite+   │            │   │
+│  │  │ Files     │  │ Files     │  │ Files     │            │   │
+│  │  │ (PRIMARY) │──▶│ (BACKUP)  │  │ (BACKUP)  │            │   │
+│  │  └───────────┘  └───────────┘  └───────────┘            │   │
+│  │         Sincronización cada 10 segundos                  │   │
+│  └─────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -54,20 +69,24 @@ El sistema **File Search** está diseñado siguiendo una arquitectura de **micro
 
 | Rol | Componente | Descripción |
 |-----|------------|-------------|
-| **Cliente** | Streamlit App | Interfaz de usuario para búsqueda, visualización y descarga de archivos |
-| **Servidor de Aplicación** | FastAPI Server | API REST que gestiona las operaciones CRUD sobre archivos |
-| **Servicio de Nombres** | DNS Service | Resolución de nombres de servicios dentro del clúster |
-| **Almacenamiento** | SQLite + Volume | Persistencia de metadatos y archivos físicos |
+| **Cliente** | Streamlit App | Interfaz de usuario con resolución DNS dinámica y reintentos automáticos |
+| **Servidor de Aplicación (PRIMARY)** | FastAPI Server | Nodo principal que atiende peticiones y sirve datos a los BACKUPs |
+| **Servidor de Aplicación (BACKUP)** | FastAPI Server | Nodos de respaldo que sincronizan datos y pueden ser promovidos a PRIMARY |
+| **Servicio de Nombres (PRIMARY)** | DNS Service | Coordinador principal del clúster, asigna roles a los servidores API |
+| **Servicio de Nombres (BACKUP)** | DNS Service | Réplicas que sincronizan estado y pueden asumir el rol de PRIMARY |
+| **Almacenamiento** | SQLite + Files internos | Datos dentro del contenedor, sincronizados entre nodos |
 
 ### 1.3 Distribución de Servicios en las Redes Docker
 
 El sistema utiliza una red **overlay** (`file_search_net`) que permite la comunicación entre nodos del swarm:
 
 **Nodo Manager:**
-- DNS Service (1 réplica)
-- Server/API (1 réplica)
+- DNS Service 1 (PRIMARY DNS)
+- Server 1 (PRIMARY API)
 
-**Nodo Worker:**
+**Nodos Worker:**
+- DNS Service 2, 3 (BACKUP DNS)
+- Server 2, 3 (BACKUP API)
 - Client (1 réplica)
 
 ```yaml
@@ -78,7 +97,14 @@ networks:
     attachable: true
 ```
 
-Esta distribución asegura que los servicios críticos (DNS y API) se ejecuten en el nodo manager, mientras que la interfaz de cliente puede distribuirse en nodos workers.
+### 1.4 Modelo PRIMARY-BACKUP
+
+El sistema implementa un modelo de alta disponibilidad donde:
+
+1. **Un solo PRIMARY activo**: Atiende todas las peticiones de escritura y lectura
+2. **Múltiples BACKUPs pasivos**: Sincronizan datos del PRIMARY cada 10 segundos
+3. **Failover automático**: Si el PRIMARY falla, un BACKUP es promovido automáticamente
+4. **Coordinación via DNS**: El servicio DNS gestiona los roles y detecta fallos mediante heartbeats
 
 ---
 
@@ -86,35 +112,47 @@ Esta distribución asegura que los servicios críticos (DNS y API) se ejecuten e
 
 ### 2.1 Tipos de Procesos dentro del Sistema
 
-El sistema cuenta con **tres procesos principales**:
+El sistema cuenta con **7 procesos principales** organizados en clústeres de alta disponibilidad:
 
-| Proceso | Tipo | Tecnología | Puerto |
-|---------|------|------------|--------|
-| **dns_service** | Servicio de infraestructura | FastAPI + Uvicorn | 5353 |
-| **server** | Servicio de aplicación | FastAPI + Uvicorn | 8000 |
-| **client** | Proceso de presentación | Streamlit | 8501 |
+| Proceso | Tipo | Tecnología | Puerto | Réplicas |
+|---------|------|------------|--------|----------|
+| **dns_1** | Servicio DNS (PRIMARY) | FastAPI + Uvicorn | 5353 | 1 |
+| **dns_2, dns_3** | Servicio DNS (BACKUP) | FastAPI + Uvicorn | 5354, 5355 | 2 |
+| **server_1** | Servidor API (PRIMARY) | FastAPI + Uvicorn | 8000 | 1 |
+| **server_2, server_3** | Servidor API (BACKUP) | FastAPI + Uvicorn | 8001, 8002 | 2 |
+| **client** | Proceso de presentación | Streamlit | 8501 | 1 |
 
 ### 2.2 Organización de los Procesos
 
-Cada servicio se ejecuta en su propio contenedor Docker, siguiendo el principio de **un proceso por contenedor**:
+Cada servicio se ejecuta en su propio contenedor Docker, con componentes adicionales para gestión del clúster:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Contenedor: dns_service                                     │
+│ Contenedor: dns_N (PRIMARY o BACKUP)                        │
 │ ┌─────────────────────────────────────────────────────────┐│
 │ │ Proceso Principal: uvicorn app.dns_service.main:app     ││
 │ │ - Gestiona resolución de nombres                        ││
-│ │ - Un solo worker para simplificar                       ││
+│ │ - Coordina roles de servidores API (PRIMARY/BACKUP)     ││
+│ │ - Detecta fallos mediante heartbeats (timeout 15s)      ││
+│ │ - Sincroniza estado con otros DNS (cada 30s)            ││
 │ └─────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│ Contenedor: server                                          │
+│ Contenedor: server_N (PRIMARY o BACKUP)                     │
 │ ┌─────────────────────────────────────────────────────────┐│
 │ │ Proceso Principal: python -m main                       ││
-│ │ - Inicializa base de datos                              ││
-│ │ - Sincroniza archivos al inicio                         ││
-│ │ - Sirve API REST                                        ││
+│ │ Componentes internos:                                   ││
+│ │ ┌─────────────────────────────────────────────────────┐││
+│ │ │ NodeManager: Registro con DNS y heartbeats (5s)     │││
+│ │ └─────────────────────────────────────────────────────┘││
+│ │ ┌─────────────────────────────────────────────────────┐││
+│ │ │ SyncService: Sincronización DB + archivos (10s)     │││
+│ │ │ (Solo activo en nodos BACKUP)                       │││
+│ │ └─────────────────────────────────────────────────────┘││
+│ │ ┌─────────────────────────────────────────────────────┐││
+│ │ │ API Endpoints: Búsqueda, CRUD, endpoints internos   │││
+│ │ └─────────────────────────────────────────────────────┘││
 │ └─────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────┘
 
@@ -123,12 +161,52 @@ Cada servicio se ejecuta en su propio contenedor Docker, siguiendo el principio 
 │ ┌─────────────────────────────────────────────────────────┐│
 │ │ Proceso Principal: streamlit run client/app.py          ││
 │ │ - Interfaz de usuario web                               ││
-│ │ - Consultas a la API                                    ││
+│ │ - Resolución DNS dinámica del servidor API              ││
+│ │ - Reintentos automáticos con failover (MAX_RETRIES=3)   ││
 │ └─────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 2.3 Patrón de Diseño con Respecto al Desempeño
+### 2.3 Componentes de Gestión del Clúster
+
+**NodeManager** (app/server/services/node_manager.py):
+```python
+class NodeManager:
+    """
+    Gestiona el ciclo de vida del nodo en el clúster:
+    - Registro inicial con el DNS
+    - Heartbeats periódicos (cada 5 segundos)
+    - Manejo de cambios de rol (PRIMARY <-> BACKUP)
+    """
+    async def wait_for_dns(self) -> bool:
+        # Espera hasta que el DNS esté disponible
+    
+    async def register(self) -> bool:
+        # Registra este servidor con el DNS
+        # El DNS asigna el rol (PRIMARY si es el primero, BACKUP si ya hay PRIMARY)
+    
+    async def heartbeat_loop(self):
+        # Envía heartbeats periódicos al DNS
+        # El DNS puede cambiar el rol en cada respuesta
+```
+
+**SyncService** (app/server/services/sync_service.py):
+```python
+class SyncService:
+    """
+    Servicio de sincronización para nodos BACKUP.
+    """
+    async def sync_database(self) -> bool:
+        # Descarga snapshot de DB desde el PRIMARY usando sqlite3.backup()
+    
+    async def sync_files(self) -> Dict[str, int]:
+        # Sincroniza archivos nuevos/modificados desde el PRIMARY
+    
+    async def sync_loop(self):
+        # Loop de sincronización cada 10 segundos
+```
+
+### 2.4 Patrón de Diseño con Respecto al Desempeño
 
 El sistema emplea una combinación de patrones:
 
@@ -172,17 +250,26 @@ class DNSClient:
 El sistema utiliza **REST (Representational State Transfer)** como protocolo principal de comunicación, implementado sobre HTTP/1.1.
 
 **Características:**
+
 - Comunicación sin estado (stateless)
 - Intercambio de datos en formato JSON
 - Métodos HTTP estándar (GET, POST, DELETE)
+- Endpoints internos para sincronización entre servidores
 
-### 3.2 Comunicación Cliente-Servidor
+### 3.2 Comunicación Cliente-Servidor (con HA)
 
 ```
-┌──────────────┐         HTTP/REST           ┌──────────────┐
-│    Client    │ ─────────────────────────▶  │    Server    │
-│  (Streamlit) │         JSON                │  (FastAPI)   │
-└──────────────┘ ◀─────────────────────────  └──────────────┘
+┌──────────────┐                                    ┌──────────────┐
+│    Client    │────────────────────────────────▶   │     DNS      │
+│  (Streamlit) │   1. GET /server/resolve           │   Service    │
+└──────────────┘ ◀────────────────────────────────  └──────────────┘
+       │            {server_id, url, role}                 │
+       │                                                   │
+       │         2. HTTP/REST a PRIMARY                    ▼
+       │         ┌──────────────────────────────────────────────┐
+       └────────▶│  server_1 (PRIMARY)  ◀──sync──  server_2,3   │
+                 │     Port 8000         Cada 10s    (BACKUP)   │
+                 └──────────────────────────────────────────────┘
 ```
 
 **Endpoints principales:**
@@ -197,89 +284,171 @@ El sistema utiliza **REST (Representational State Transfer)** como protocolo pri
 | POST | `/upload` | Sube un nuevo archivo |
 | DELETE | `/files/{file_id}` | Elimina un archivo |
 
-### 3.3 Comunicación Servidor-Servidor (DNS Service)
+**Endpoints internos (sincronización entre servidores):**
+
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| GET | `/internal/db_snapshot` | Descarga snapshot de la base de datos |
+| GET | `/internal/files` | Lista archivos con metadatos para sincronización |
+| GET | `/internal/file/{path}` | Descarga un archivo específico para sincronización |
+
+### 3.3 Comunicación Servidor-DNS (Coordinación del Clúster)
 
 ```
 ┌──────────────┐         HTTP/REST           ┌──────────────┐
-│    Client    │ ─────────────────────────▶  │  DNS Service │
-│  (Resolver)  │                             │   (FastAPI)  │
+│   Server N   │ ─────────────────────────▶  │  DNS Service │
+│  (API Node)  │   POST /server/register     │   (Coord.)   │
+│              │   POST /server/heartbeat    │              │
 └──────────────┘ ◀─────────────────────────  └──────────────┘
-                   ResolutionResponse
+                   {role: PRIMARY|BACKUP}
 ```
 
-**Endpoint DNS:**
+**Endpoints DNS para servidores API:**
+
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| POST | `/server/register` | Registra un servidor API en el clúster |
+| POST | `/server/heartbeat` | Envía heartbeat y recibe rol actual |
+| GET | `/server/resolve` | Obtiene URL del servidor PRIMARY |
+| GET | `/server/list` | Lista todos los servidores y sus estados |
+
+### 3.4 Flujo de Comunicación con Reintentos
+
+El cliente implementa un sistema de reintentos con re-resolución DNS:
 
 ```python
-@app.get("/resolve/{hostname}")
-def resolve_hostname(hostname: str) -> ResolutionResponse:
-    return ResolutionResponse(
-        hostname=hostname,
-        ip=ip_address,
-        ttl=300
-    )
-```
-
-### 3.4 Comunicación entre Procesos
-
-La comunicación interna dentro de cada servicio sigue un patrón de llamadas directas a funciones:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         SERVER                               │
-│                                                              │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐  │
-│  │  endpoints  │───▶│    crud     │───▶│     SQLite      │  │
-│  │   (API)     │    │   (Data)    │    │   (Storage)     │  │
-│  └─────────────┘    └─────────────┘    └─────────────────┘  │
-│         │                                                    │
-│         ▼                                                    │
-│  ┌─────────────┐                                            │
-│  │   scanner   │                                            │
-│  │ (Sync)      │                                            │
-│  └─────────────┘                                            │
-└─────────────────────────────────────────────────────────────┘
+def make_request_with_retry(method: str, path: str, **kwargs) -> requests.Response:
+    """
+    Realiza una petición HTTP con reintentos y re-resolución DNS.
+    """
+    for attempt in range(1, MAX_RETRIES + 1):  # MAX_RETRIES = 3
+        try:
+            url = api_url(path)  # Resuelve via DNS
+            response = requests.get(url, timeout=15, **kwargs)
+            response.raise_for_status()
+            return response
+        except (requests.ConnectionError, requests.Timeout) as e:
+            # Invalida cache y fuerza re-resolución en siguiente intento
+            _invalidate_server_cache()
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY)  # RETRY_DELAY = 0.5s
+    raise last_exception
 ```
 
 ---
 
 ## 4. Coordinación o el problema de poner todos los servicios de acuerdo
 
-### 4.1 Sincronización de Acciones
+### 4.1 Coordinación de Roles (PRIMARY-BACKUP)
 
-El sistema implementa sincronización en los siguientes escenarios:
+El sistema implementa un mecanismo de coordinación centralizada a través del servicio DNS:
 
-1. **Inicialización del Servidor**: Al arrancar, el servidor sincroniza la base de datos con el sistema de archivos:
+**Flujo de asignación de roles:**
+
+```
+┌─────────────┐     1. POST /server/register      ┌─────────────┐
+│  Server N   │ ─────────────────────────────────▶│     DNS     │
+│  (startup)  │     {server_id, ip, port}         │   Service   │
+└─────────────┘                                    └─────────────┘
+       │                                                  │
+       │                                                  ▼
+       │         2. Response: {role: PRIMARY|BACKUP}     ┌─────────────┐
+       │ ◀─────────────────────────────────────────────  │  Evaluación │
+       │                                                  │  ¿Hay otro  │
+       │                                                  │  PRIMARY?   │
+       ▼                                                  └─────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  Si role == PRIMARY:                                    │
+│    - Atender todas las peticiones                       │
+│    - Servir datos a los BACKUPs                         │
+│                                                         │
+│  Si role == BACKUP:                                     │
+│    - Iniciar SyncService                                │
+│    - Sincronizar DB y archivos cada 10 segundos         │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 4.2 Detección de Fallos mediante Heartbeats
+
+```python
+# En NodeManager (cada servidor API)
+async def heartbeat_loop(self):
+    while self._running:
+        response = await client.post(
+            f"{self._dns_url}/server/heartbeat",
+            json={"server_id": self.server_id, "current_role": self._role}
+        )
+        # El DNS puede cambiar nuestro rol en la respuesta
+        new_role = data.get("role")
+        if new_role != self._role:
+            await self._handle_role_change(new_role, data)
+        
+        await asyncio.sleep(HEARTBEAT_INTERVAL)  # 5 segundos
+
+# En DNS Service (detección de servidores caídos)
+async def check_api_servers():
+    for server_id, info in api_servers.items():
+        seconds_since_heartbeat = (now - info["last_heartbeat"]).total_seconds()
+        if seconds_since_heartbeat > API_SERVER_TIMEOUT:  # 15 segundos
+            # Servidor considerado caído
+            if info["role"] == "PRIMARY":
+                # Promover un BACKUP a PRIMARY
+                await promote_backup_to_primary()
+```
+
+### 4.3 Sincronización de Acciones
+
+1. **Inicialización del Servidor**: Al arrancar, el servidor espera al DNS y se registra:
 
 ```python
 @app.on_event("startup")
 async def startup_event():
-    init_db()
-    summary = sync()
-    logger.info("Base de datos inicializada y sincronizada", extra={"sync": summary})
+    init_db()  # Inicializa base de datos local
+    summary = sync()  # Sincroniza archivos locales
+    
+    # Registrar con el clúster
+    await node_manager.wait_for_dns()  # Espera hasta 10 reintentos
+    await node_manager.register()      # Obtiene rol del DNS
+    
+    # Iniciar tareas de fondo
+    asyncio.create_task(node_manager.heartbeat_loop())
+    if node_manager.is_backup:
+        asyncio.create_task(sync_service.sync_loop())
 ```
 
 2. **Orden de Arranque de Servicios**: Docker Compose asegura el orden de inicio mediante `depends_on`:
 
 ```yaml
 services:
-  server:
+  server_1:
     depends_on:
-      - dns_service
+      dns_1:
+        condition: service_healthy  # Espera healthcheck del DNS
   
-  client:
+  server_2:
     depends_on:
-      - server
-      - dns_service
+      dns_1:
+        condition: service_healthy
+      server_1:
+        condition: service_started  # Espera que server_1 inicie
 ```
 
-### 4.2 Acceso Exclusivo a Recursos - Condiciones de Carrera
+### 4.4 Acceso Exclusivo a Recursos - Condiciones de Carrera
 
-El sistema gestiona el acceso a recursos compartidos de la siguiente manera:
-
-1. **Base de Datos SQLite**: Se utiliza un timeout de conexión para evitar bloqueos:
+1. **Lock asíncrono para operaciones en api_servers:**
 
 ```python
-conn = sqlite3.connect(str(DB_PATH), timeout=30, check_same_thread=False)
+# En DNS Service
+api_servers_lock = asyncio.Lock()
+
+async def register_api_server(request: APIServerRegisterRequest):
+    async with api_servers_lock:
+        # Operaciones atómicas sobre api_servers
+        if not any(s["role"] == "PRIMARY" for s in api_servers.values()):
+            role = "PRIMARY"
+        else:
+            role = "BACKUP"
+        api_servers[request.server_id] = {...}
 ```
 
 2. **Operaciones Atómicas con UPSERT**: Para evitar condiciones de carrera en la inserción/actualización:
@@ -308,21 +477,6 @@ def get_conn():
         raise
     finally:
         conn.close()
-```
-
-### 4.3 Toma de Decisiones Distribuidas
-
-En el estado actual del sistema (versión centralizada), la toma de decisiones se realiza de forma local en cada servicio. Para la evolución hacia un sistema distribuido completo, se planifica:
-
-1. **Descubrimiento de Servicios**: El DNS Service actúa como punto de coordinación para localizar servicios activos.
-
-2. **Política de Fallback**: El cliente implementa fallback automático cuando el DNS Service no está disponible:
-
-```python
-def resolve(self, hostname: str) -> str:
-    # 1. Verificar Caché
-    # 2. Consultar API del DNS Service
-    # 3. Fallback: Resolución nativa (Docker DNS)
 ```
 
 ---
@@ -393,52 +547,120 @@ class DNSClient:
 
 ### 6.1 Distribución de los Datos
 
-Actualmente, el sistema utiliza una arquitectura de datos centralizada:
+El sistema implementa replicación completa con un modelo PRIMARY-BACKUP:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    NODO PRINCIPAL                            │
+│                    ARQUITECTURA DE DATOS                     │
 │                                                              │
-│  ┌───────────────────┐      ┌───────────────────────────┐   │
-│  │     SQLite DB     │      │       File Volume         │   │
-│  │  (Única instancia)│      │   (Almacenamiento único)  │   │
-│  └───────────────────┘      └───────────────────────────┘   │
-│                                                              │
+│  ┌─────────────────┐     ┌─────────────────┐                │
+│  │   Server 1      │     │   Server 2      │                │
+│  │   (PRIMARY)     │────▶│   (BACKUP)      │                │
+│  │ ┌─────────────┐ │sync │ ┌─────────────┐ │                │
+│  │ │ SQLite DB   │ │ 10s │ │ SQLite DB   │ │                │
+│  │ │ (12 KB)     │ │────▶│ │ (12 KB)     │ │                │
+│  │ └─────────────┘ │     │ └─────────────┘ │                │
+│  │ ┌─────────────┐ │     │ ┌─────────────┐ │                │
+│  │ │ /app/files  │ │────▶│ │ /app/files  │ │                │
+│  │ │ (interno)   │ │     │ │ (interno)   │ │                │
+│  │ └─────────────┘ │     │ └─────────────┘ │                │
+│  └─────────────────┘     └─────────────────┘                │
+│           │                      ▲                          │
+│           │      sync 10s        │                          │
+│           └──────────────────────┼──────────────────┐       │
+│                                  │                  │       │
+│                          ┌───────┴───────┐          │       │
+│                          │   Server 3    │          │       │
+│                          │   (BACKUP)    │◀─────────┘       │
+│                          │ ┌───────────┐ │                  │
+│                          │ │ SQLite DB │ │                  │
+│                          │ └───────────┘ │                  │
+│                          │ ┌───────────┐ │                  │
+│                          │ │ /app/files│ │                  │
+│                          │ └───────────┘ │                  │
+│                          └───────────────┘                  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Estrategia planificada para replicación:**
-- Implementación de múltiples réplicas del servidor API
-- Sincronización de base de datos entre réplicas
-- Volumen compartido NFS para archivos
+**Características del almacenamiento:**
+
+- **Datos internos al contenedor**: No se usan volúmenes persistentes para datos
+- **Solo logs en volúmenes**: Los logs se comparten via volumen para debugging
+- **Copia inicial al arrancar**: Los archivos se copian desde un volumen temporal de solo lectura al iniciar el contenedor
 
 ### 6.2 Replicación - Cantidad de Réplicas
 
-**Configuración actual en stack.yml:**
+**Configuración actual:**
+
+| Componente | Réplicas | Rol |
+|------------|----------|-----|
+| DNS Service | 3 | 1 PRIMARY + 2 BACKUP |
+| API Server | 3 | 1 PRIMARY + 2 BACKUP |
+| Cliente | 1 | Sin replicación |
+
+**Configuración en docker-compose.yml:**
 
 ```yaml
-deploy:
-  replicas: 1  # Una réplica por servicio
-  restart_policy:
-    condition: on-failure
+services:
+  server_1:  # PRIMARY (primer servidor en registrarse)
+    volumes:
+      - ${FILES_SOURCE:-./runtime/files}:/tmp/source_files:ro  # Temporal
+      - ./runtime/logs:/app/logs  # Solo logs persistentes
+  
+  server_2:  # BACKUP
+    volumes:
+      - ${FILES_SOURCE:-./runtime/files}:/tmp/source_files:ro
+      - ./runtime/logs:/app/logs
+  
+  server_3:  # BACKUP
+    volumes:
+      - ${FILES_SOURCE:-./runtime/files}:/tmp/source_files:ro
+      - ./runtime/logs:/app/logs
 ```
 
-**Objetivo de tolerancia a fallos nivel 2:**
-- Mínimo 2 réplicas del servidor API
-- DNS Service con réplica de respaldo
-- Cliente escalable horizontalmente
+### 6.3 Mecanismo de Sincronización
 
-### 6.3 Confiabilidad de las Réplicas tras Actualización
-
-Para mantener la consistencia, el sistema implementa:
-
-1. **Sincronización al inicio**: Cada servidor sincroniza su estado con el filesystem al arrancar:
+**SyncService** implementa sincronización cada 10 segundos:
 
 ```python
-@app.on_event("startup")
-async def startup_event():
-    init_db()
-    summary = sync()
+class SyncService:
+    async def sync_database(self) -> bool:
+        """Descarga snapshot de DB usando sqlite3.backup() para consistencia."""
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(f"{primary_url}/internal/db_snapshot")
+            
+            # Guardar en archivo temporal
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                tmp.write(response.content)
+            
+            # Verificar integridad
+            conn = sqlite3.connect(tmp_path)
+            cursor.execute("PRAGMA integrity_check")
+            
+            # Reemplazar base de datos local
+            shutil.move(tmp_path, str(DB_PATH))
+    
+    async def sync_files(self) -> Dict[str, int]:
+        """Sincroniza archivos nuevos/modificados."""
+        # Obtener lista de archivos del PRIMARY
+        response = await client.get(f"{primary_url}/internal/files")
+        remote_files = response.json()["files"]
+        
+        for file in remote_files:
+            if not local_exists or local_size != remote_size:
+                # Descargar archivo
+                await download_file(file["relative_path"])
+```
+
+### 6.4 Consistencia tras Actualización
+
+El sistema garantiza consistencia eventual con los siguientes mecanismos:
+
+1. **Sincronización al inicio**: Cada servidor sincroniza archivos locales al arrancar desde el volumen temporal:
+
+```bash
+# entrypoint.sh
+cp -r "$SOURCE_FILES_DIR"/* "$INTERNAL_FILES_DIR"/
 ```
 
 2. **Identificadores estables**: Los file_id basados en hash garantizan identificación consistente:
@@ -450,92 +672,126 @@ def _compute_file_id(relative_path: str) -> str:
 
 3. **Operaciones idempotentes**: UPSERT permite reintentos sin duplicación.
 
+4. **Verificación de integridad**: Antes de reemplazar la DB, se verifica con `PRAGMA integrity_check`.
+
 ---
 
 ## 7. Tolerancia a Fallos o el problema de para qué pasar tanto trabajo distribuyendo datos y servicios si al fallar una componente del sistema todo se viene abajo
 
-### 7.1 Respuesta a Errores
+### 7.1 Nivel de Tolerancia a Fallos Alcanzado
 
-El sistema implementa múltiples mecanismos de respuesta a errores:
+El sistema implementa **Nivel 2 de tolerancia a fallos**:
 
-**1. Manejo de excepciones HTTP:**
+| Escenario | Comportamiento | Tiempo de Recuperación |
+|-----------|----------------|------------------------|
+| Caída del PRIMARY | BACKUP promovido automáticamente | ~15 segundos (timeout) |
+| Caída de 1 BACKUP | Sistema continúa operando | Sin impacto |
+| Caída de PRIMARY + 1 BACKUP | Último BACKUP se convierte en PRIMARY | ~15 segundos |
+| Caída de 2 BACKUPs | PRIMARY continúa operando solo | Sin impacto |
+| Reinicio de servidor caído | Re-registra como BACKUP y sincroniza | ~10 segundos |
+
+### 7.2 Mecanismos de Detección de Fallos
+
+**1. Heartbeats con timeout:**
 
 ```python
-@app.get("/files/{file_id}/download")
-def download_file_endpoint(file_id: str, request: Request):
-    try:
-        target = file_handler.resolve_download(file_id)
-    except file_handler.FileRecordNotFoundError:
-        raise HTTPException(status_code=404, detail="Archivo no encontrado")
-    except file_handler.FileOnDiskNotFoundError:
-        raise HTTPException(status_code=404, detail="Archivo no disponible en disco")
+# Servidor envía heartbeat cada 5 segundos
+HEARTBEAT_INTERVAL = 5
+
+# DNS considera servidor caído tras 15 segundos sin heartbeat
+API_SERVER_TIMEOUT = 15
+
+# Verificación en DNS
+async def check_api_servers():
+    async with api_servers_lock:
+        for server_id, info in api_servers.items():
+            seconds = (now - info["last_heartbeat"]).total_seconds()
+            info["alive"] = seconds <= API_SERVER_TIMEOUT
+            
+        # Si PRIMARY está caído, promover un BACKUP
+        primary = get_primary()
+        if primary and not primary["alive"]:
+            await promote_backup_to_primary()
+```
+
+**2. Promoción automática de BACKUP a PRIMARY:**
+
+```python
+async def promote_backup_to_primary():
+    """Promueve el primer BACKUP disponible a PRIMARY."""
+    for server_id, info in api_servers.items():
+        if info["role"] == "BACKUP" and info["alive"]:
+            info["role"] = "PRIMARY"
+            logger.info(f"[DNS] {server_id} promovido a PRIMARY")
+            
+            # El servidor recibirá su nuevo rol en el próximo heartbeat
+            break
+```
+
+### 7.3 Respuesta a Errores
+
+**1. Cliente con reintentos y failover:**
+
+```python
+def make_request_with_retry(method: str, path: str, **kwargs):
+    for attempt in range(1, MAX_RETRIES + 1):  # MAX_RETRIES = 3
+        try:
+            url = api_url(path)  # Resuelve via DNS
+            response = requests.get(url, timeout=15)
+            return response
+        except (requests.ConnectionError, requests.Timeout):
+            # Invalida cache para forzar re-resolución DNS
+            _invalidate_server_cache()
+            time.sleep(RETRY_DELAY)  # 0.5 segundos
 ```
 
 **2. Fallback en resolución DNS:**
 
 ```python
-def resolve(self, hostname: str) -> str:
-    # Si falla el DNS Service, usa resolución nativa
-    try:
-        ip = socket.gethostbyname(hostname)
-        return ip
-    except socket.gaierror:
-        logger.error(f"Imposible resolver '{hostname}' incluso con fallback.")
-        raise
+def get_api_base_url() -> str:
+    # Intenta resolver via DNS
+    server_url = _resolve_server_from_dns()
+    if server_url:
+        return server_url
+    
+    # Fallback: Usar variable de entorno
+    return os.getenv("API_BASE_URL", "http://localhost:8000")
 ```
 
-**3. Re-bootstrap automático:**
-
-```python
-if self.dns_ip is None:
-    logger.warning("DNS Service IP no disponible. Intentando re-bootstrap...")
-    self._bootstrap()
-```
-
-### 7.2 Nivel de Tolerancia a Fallos Esperado
-
-**Objetivo: Nivel 2 de tolerancia a fallos**
-
-| Componente | Estado Actual | Objetivo |
-|------------|---------------|----------|
-| DNS Service | 1 réplica | 2 réplicas + fallback |
-| API Server | 1 réplica | 2+ réplicas con load balancing |
-| Client | 1 réplica | Escalable según demanda |
-| Base de Datos | 1 instancia | Replicación master-slave |
-
-### 7.3 Fallos Parciales - Nodos Caídos Temporalmente
-
-**Mecanismos implementados:**
-
-1. **Restart automático en Docker:**
+**3. Restart automático en Docker:**
 
 ```yaml
 deploy:
   restart_policy:
     condition: on-failure
+    delay: 5s
+    max_attempts: 3
 ```
 
-2. **Timeouts en conexiones:**
+### 7.4 Escenarios de Failover Probados
 
-```python
-response = requests.get(url, timeout=2.0)
+**Escenario 1: Caída del PRIMARY**
+```
+Estado inicial: server_1 (PRIMARY), server_2 (BACKUP), server_3 (BACKUP)
+Acción: docker compose stop server_1
+Resultado: Tras 15s, server_2 o server_3 promovido a PRIMARY
+Datos: Disponibles (sincronizados previamente)
 ```
 
-3. **Caché con TTL reducido para fallback:**
-
-```python
-# Cachear resultado de fallback por menos tiempo
-self._cache[hostname] = {
-    'ip': ip,
-    'expires_at': time.time() + 60  # 1 minuto para fallback
-}
+**Escenario 2: Caída de PRIMARY + 1 BACKUP**
+```
+Estado: server_1 (PRIMARY), server_2 (BACKUP), server_3 (BACKUP)
+Acción: docker compose stop server_1 server_2
+Resultado: server_3 promovido a PRIMARY
+Datos: Disponibles
 ```
 
-**Nodos nuevos que se incorporan:**
-
-- Los nuevos contenedores se registran automáticamente en el DNS de Docker
-- El DNS Service puede resolver nuevos servicios inmediatamente
-- La sincronización de archivos ocurre al inicio de cada servidor
+**Escenario 3: Reincorporación de servidor**
+```
+Estado: server_2 (PRIMARY)
+Acción: docker compose start server_1
+Resultado: server_1 re-registra como BACKUP, inicia sincronización
+```
 
 ---
 
@@ -626,55 +882,171 @@ access_logger.info(
 ## Diagrama de Despliegue
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     ORDENADOR 1 (Manager)                        │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                  Docker Swarm Manager                    │    │
-│  │  ┌─────────────────┐    ┌─────────────────────────────┐ │    │
-│  │  │   dns_service   │    │          server             │ │    │
-│  │  │   Port: 5353    │◀──▶│        Port: 8000           │ │    │
-│  │  └─────────────────┘    └─────────────────────────────┘ │    │
-│  │                              │                          │    │
-│  │                    ┌─────────┴─────────┐                │    │
-│  │                    │                   │                │    │
-│  │               ┌────▼────┐        ┌─────▼─────┐          │    │
-│  │               │ SQLite  │        │  /files   │          │    │
-│  │               │   DB    │        │  Volume   │          │    │
-│  │               └─────────┘        └───────────┘          │    │
-│  └─────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                    Red Overlay (file_search_net)
-                              │
-┌─────────────────────────────────────────────────────────────────┐
-│                     ORDENADOR 2 (Worker)                         │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                  Docker Swarm Worker                     │    │
-│  │  ┌─────────────────────────────────────────────────────┐│    │
-│  │  │                    client                           ││    │
-│  │  │                  Port: 8501                         ││    │
-│  │  │               (Streamlit UI)                        ││    │
-│  │  └─────────────────────────────────────────────────────┘│    │
-│  └─────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         DOCKER SWARM / COMPOSE                               │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │                     NODO MANAGER                                        ││
+│  │  ┌─────────────────┐    ┌─────────────────────────────────────────────┐ ││
+│  │  │   dns_1         │    │              server_1                       │ ││
+│  │  │   (PRIMARY)     │◀──▶│             (PRIMARY)                       │ ││
+│  │  │   Port: 5353    │    │            Port: 8000                       │ ││
+│  │  │                 │    │  ┌─────────────┐  ┌─────────────────────┐   │ ││
+│  │  │ - Coordina      │    │  │ NodeManager │  │    SyncService      │   │ ││
+│  │  │   roles         │    │  │ (heartbeat) │  │    (inactivo)       │   │ ││
+│  │  │ - Detecta       │    │  └─────────────┘  └─────────────────────┘   │ ││
+│  │  │   fallos        │    │  ┌─────────────┐  ┌─────────────────────┐   │ ││
+│  │  │ - Promueve      │    │  │ SQLite DB   │  │     /app/files      │   │ ││
+│  │  │   BACKUPs       │    │  │  (interno)  │  │     (interno)       │   │ ││
+│  │  └─────────────────┘    │  └─────────────┘  └─────────────────────┘   │ ││
+│  │                         └─────────────────────────────────────────────┘ ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+│                                     │                                        │
+│                     Red Overlay (file_search_net)                            │
+│                                     │                                        │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │                     NODOS WORKER                                        ││
+│  │                                                                          ││
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐  ││
+│  │  │    dns_2        │  │    dns_3        │  │        client           │  ││
+│  │  │   (BACKUP)      │  │   (BACKUP)      │  │     Port: 8501          │  ││
+│  │  │   Port: 5354    │  │   Port: 5355    │  │                         │  ││
+│  │  │                 │  │                 │  │  - Resolución DNS       │  ││
+│  │  │ - Sincroniza    │  │ - Sincroniza    │  │  - Reintentos auto      │  ││
+│  │  │   estado        │  │   estado        │  │  - Failover             │  ││
+│  │  └─────────────────┘  └─────────────────┘  └─────────────────────────┘  ││
+│  │                                                                          ││
+│  │  ┌─────────────────────────────────────────────────────────────────────┐││
+│  │  │                     SERVIDORES API BACKUP                           │││
+│  │  │                                                                      │││
+│  │  │  ┌─────────────────────────┐  ┌─────────────────────────────────┐   │││
+│  │  │  │       server_2          │  │          server_3               │   │││
+│  │  │  │       (BACKUP)          │  │          (BACKUP)               │   │││
+│  │  │  │      Port: 8001         │  │         Port: 8002              │   │││
+│  │  │  │                         │  │                                 │   │││
+│  │  │  │  ┌───────────────────┐  │  │  ┌───────────────────────────┐  │   │││
+│  │  │  │  │   SyncService     │  │  │  │      SyncService          │  │   │││
+│  │  │  │  │  (cada 10s)       │  │  │  │     (cada 10s)            │  │   │││
+│  │  │  │  │                   │  │  │  │                           │  │   │││
+│  │  │  │  │  ┌─────────────┐  │  │  │  │  ┌─────────────────────┐  │  │   │││
+│  │  │  │  │  │ sync DB     │  │  │  │  │  │    sync DB          │  │  │   │││
+│  │  │  │  │  │ sync files  │  │  │  │  │  │    sync files       │  │  │   │││
+│  │  │  │  │  └─────────────┘  │  │  │  │  └─────────────────────┘  │  │   │││
+│  │  │  │  └───────────────────┘  │  │  └───────────────────────────┘  │   │││
+│  │  │  │                         │  │                                 │   │││
+│  │  │  │  ┌─────────┐ ┌───────┐  │  │  ┌─────────┐  ┌─────────────┐   │   │││
+│  │  │  │  │SQLite DB│ │/files │  │  │  │SQLite DB│  │  /files     │   │   │││
+│  │  │  │  │(replica)│ │(sync) │  │  │  │(replica)│  │  (sync)     │   │   │││
+│  │  │  │  └─────────┘ └───────┘  │  │  └─────────┘  └─────────────┘   │   │││
+│  │  │  └─────────────────────────┘  └─────────────────────────────────┘   │││
+│  │  │                              ▲                                       │││
+│  │  │              Sincronización  │  cada 10 segundos                     │││
+│  │  │              desde PRIMARY   │                                       │││
+│  │  └──────────────────────────────┼───────────────────────────────────────┘││
+│  │                                 │                                        ││
+│  └─────────────────────────────────┼────────────────────────────────────────┘│
+│                                    │                                         │
+│  ┌─────────────────────────────────┴────────────────────────────────────────┐│
+│  │                      VOLUMEN COMPARTIDO (solo logs)                      ││
+│  │                         ./runtime/logs:/app/logs                          ││
+│  └──────────────────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Flujo de Failover
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                         FLUJO DE FAILOVER                                 │
+│                                                                           │
+│   ESTADO NORMAL                                                           │
+│   ═══════════                                                             │
+│   server_1 (PRIMARY) ───heartbeat 5s───▶ dns_1                           │
+│   server_2 (BACKUP)  ───heartbeat 5s───▶ dns_1                           │
+│   server_3 (BACKUP)  ───heartbeat 5s───▶ dns_1                           │
+│                                                                           │
+│   FALLO DETECTADO (15s sin heartbeat)                                     │
+│   ═════════════════════════════════════                                   │
+│   server_1 ──── X ────▶ dns_1 (no responde)                              │
+│                                                                           │
+│   DNS detecta: seconds_since_heartbeat > 15                               │
+│                                                                           │
+│   PROMOCIÓN AUTOMÁTICA                                                    │
+│   ════════════════════                                                    │
+│   dns_1: promote_backup_to_primary()                                      │
+│          server_2.role = "PRIMARY"                                        │
+│                                                                           │
+│   NOTIFICACIÓN VIA HEARTBEAT                                              │
+│   ═════════════════════════                                               │
+│   server_2 ◀──── {role: "PRIMARY"} ──── dns_1                            │
+│   server_2: _handle_role_change("PRIMARY")                                │
+│             stop SyncService                                              │
+│                                                                           │
+│   REINCORPORACIÓN                                                         │
+│   ══════════════                                                          │
+│   server_1 (reiniciado) ───POST /server/register───▶ dns_1               │
+│   dns_1: Ya hay PRIMARY, asignar BACKUP                                   │
+│   server_1 ◀──── {role: "BACKUP"} ──── dns_1                             │
+│   server_1: start SyncService                                             │
+│             sync desde server_2 (nuevo PRIMARY)                           │
+│                                                                           │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Conclusiones
 
-El sistema **File Search** implementa una arquitectura de microservicios sobre Docker Swarm que permite:
+El sistema **File Search** implementa una arquitectura de microservicios con **alta disponibilidad** sobre Docker Swarm que alcanza:
 
-1. **Escalabilidad**: Los servicios pueden replicarse según la demanda.
-2. **Aislamiento**: Cada componente opera de forma independiente.
-3. **Descubrimiento dinámico**: El DNS Service facilita la localización de servicios.
-4. **Resiliencia**: Mecanismos de fallback y restart automático.
+### Logros Implementados
 
-**Próximos pasos para alcanzar tolerancia a fallos nivel 2:**
-- Implementar replicación de la base de datos
-- Configurar múltiples réplicas del servidor API
-- Añadir load balancer para distribución de carga
-- Implementar sincronización de datos entre réplicas
+1. **Tolerancia a Fallos Nivel 2**: 
+   - El sistema puede sobrevivir a la caída de hasta 2 servidores API
+   - Failover automático en ~15 segundos
+   - Re-sincronización automática al reincorporar nodos
+
+2. **Replicación Completa**:
+   - 3 réplicas del servidor API (1 PRIMARY + 2 BACKUP)
+   - 3 réplicas del servicio DNS (1 PRIMARY + 2 BACKUP)
+   - Sincronización de base de datos cada 10 segundos
+   - Sincronización de archivos cada 10 segundos
+
+3. **Coordinación Centralizada**:
+   - DNS Service como coordinador del clúster
+   - Asignación dinámica de roles (PRIMARY/BACKUP)
+   - Detección de fallos mediante heartbeats
+
+4. **Almacenamiento Sin Volúmenes**:
+   - Datos internos al contenedor (no volúmenes persistentes)
+   - Solo logs en volúmenes compartidos
+   - Copia inicial desde volumen temporal de solo lectura
+
+5. **Cliente Resiliente**:
+   - Resolución DNS dinámica del servidor PRIMARY
+   - Reintentos automáticos con re-resolución
+   - Failover transparente al usuario
+
+### Métricas del Sistema
+
+| Métrica | Valor |
+|---------|-------|
+| Intervalo de heartbeat | 5 segundos |
+| Timeout de servidor | 15 segundos |
+| Intervalo de sincronización | 10 segundos |
+| Reintentos del cliente | 3 |
+| Tiempo de failover | ~15 segundos |
+
+### Componentes Implementados
+
+| Archivo | Descripción |
+|---------|-------------|
+| `app/server/services/node_manager.py` | Gestión del nodo en el clúster |
+| `app/server/services/sync_service.py` | Sincronización de datos para BACKUPs |
+| `app/dns_service/main.py` | Coordinador del clúster con gestión de roles |
+| `app/client/app.py` | Cliente con resolución DNS y reintentos |
+| `docker-compose.yml` | Configuración de 3 servidores + 3 DNS |
+| `stack.yml` | Configuración para Docker Swarm |
 
 ---
 
