@@ -441,7 +441,55 @@ Nota: **Orden de Arranque de Servicios**: Debe asegurarse el orden de inicio de 
 
 ### 4.4 Acceso Exclusivo a Recursos - Condiciones de Carrera
 
-1. **Lock asíncrono para operaciones en api_servers:**
+En un sistema distribuido, múltiples procesos pueden intentar acceder o modificar los mismos recursos simultáneamente. Una **condición de carrera** ocurre cuando el resultado de una operación depende del orden impredecible en que se ejecutan las operaciones concurrentes, llevando a estados inconsistentes o errores.
+
+#### Escenarios de Condiciones de Carrera en File Search
+
+**Escenario 1: Registro simultáneo de servidores**
+
+Imaginemos que `server_1` y `server_2` arrancan casi al mismo tiempo y ambos solicitan registrarse al DNS:
+
+```
+Tiempo T1: server_1 pregunta "¿Hay PRIMARY?" → DNS responde "No"
+Tiempo T2: server_2 pregunta "¿Hay PRIMARY?" → DNS responde "No"
+Tiempo T3: server_1 se registra como PRIMARY
+Tiempo T4: server_2 se registra como PRIMARY  ← ¡ERROR! Dos PRIMARY
+```
+
+Sin protección, ambos servidores podrían terminar siendo PRIMARY, violando la invariante del sistema de "un único PRIMARY activo".
+
+**Escenario 2: Actualización concurrente de archivos**
+
+Si dos peticiones intentan actualizar el mismo archivo simultáneamente:
+
+```
+Cliente A: Lee archivo X (versión 1)
+Cliente B: Lee archivo X (versión 1)
+Cliente A: Escribe archivo X con cambios de A → versión 2
+Cliente B: Escribe archivo X con cambios de B → versión 2  ← ¡Cambios de A perdidos!
+```
+
+**Escenario 3: Heartbeat y promoción simultáneos**
+
+```
+DNS: Detecta que PRIMARY no responde, inicia promoción de BACKUP
+PRIMARY: Se recupera y envía heartbeat justo en ese momento
+Resultado: ¿Quién es el PRIMARY ahora?
+```
+
+#### Estrategias de Protección Implementadas
+
+El sistema emplea tres mecanismos complementarios para evitar condiciones de carrera:
+
+| Mecanismo | Problema que Resuelve | Dónde se Aplica |
+|-----------|----------------------|-----------------|
+| **Lock asíncrono** | Acceso concurrente a estructuras en memoria | Registro de servidores en DNS |
+| **Operaciones atómicas (UPSERT)** | Lecturas y escrituras no atómicas en DB | Inserción/actualización de archivos |
+| **Transacciones con rollback** | Operaciones parcialmente completadas | Todas las operaciones de base de datos |
+
+#### Implementación de los Mecanismos
+
+**1. Lock asíncrono para operaciones en api_servers:**
 
 ```python
 # En DNS Service
@@ -457,7 +505,11 @@ async def register_api_server(request: APIServerRegisterRequest):
         api_servers[request.server_id] = {...}
 ```
 
-2. **Operaciones Atómicas con UPSERT**: Para evitar condiciones de carrera en la inserción/actualización:
+El lock garantiza que solo un "hilo" de ejecución (corrutina) puede estar dentro de la sección crítica a la vez. Mientras un servidor se está registrando, cualquier otro registro debe esperar.
+
+**2. Operaciones Atómicas con UPSERT:**
+
+El problema clásico de "leer-verificar-escribir" (check-then-act) se resuelve combinando la verificación y la escritura en una única operación atómica a nivel de base de datos:
 
 ```sql
 INSERT INTO files (file_id, name, path, size, last_modified)
@@ -469,7 +521,11 @@ ON CONFLICT(file_id) DO UPDATE SET
     last_modified = excluded.last_modified
 ```
 
-3. **Context Manager para Transacciones**:
+En lugar de hacer `SELECT` para verificar si existe y luego `INSERT` o `UPDATE`, la instrucción `ON CONFLICT ... DO UPDATE` realiza ambas operaciones en un solo paso atómico. La base de datos garantiza que no habrá interferencia entre operaciones concurrentes.
+
+**3. Context Manager para Transacciones:**
+
+Las transacciones aseguran que un conjunto de operaciones se ejecute "todo o nada". Si algo falla a mitad de camino, se deshacen todos los cambios (rollback), evitando estados intermedios inconsistentes:
 
 ```python
 @contextmanager
@@ -516,14 +572,7 @@ def _compute_file_id(relative_path: str) -> str:
 - **Archivos físicos**: Directorio interno `/app/files` (no volumen persistente)
 - **Logs**: Volumen compartido `/app/logs` (único volumen externo)
 
-**Distribución de Servicios en 2 Nodos:**
-
-| Nodo | Servicios PRIMARY | Servicios BACKUP |
-|------|-------------------|------------------|
-| **Nodo 1 (Manager)** | client_1, dns_1, server_1 | client_3, dns_3, server_3 |
-| **Nodo 2 (Worker)** | - | client_2, dns_2, server_2 |
-
-Esta distribución garantiza que si un nodo falla, el otro tiene servicios que pueden ser promovidos a PRIMARY.
+Nota: Los servicios están distribuidos en 2 nodos físicos. Esta distribución garantiza que si un nodo falla, el otro tiene servicios que pueden ser promovidos a PRIMARY.
 
 ### 5.3 Localización de Datos y Servicios
 
@@ -608,26 +657,6 @@ El sistema implementa replicación completa con un modelo PRIMARY-BACKUP:
 | Cliente | 3 | 1 PRIMARY + 2 BACKUP | Nodo 1: client_1 (P), client_3 (B); Nodo 2: client_2 (B) |
 | DNS Service | 3 | 1 PRIMARY + 2 BACKUP | Nodo 1: dns_1 (P), dns_3 (B); Nodo 2: dns_2 (B) |
 | API Server | 3 | 1 PRIMARY + 2 BACKUP | Nodo 1: server_1 (P), server_3 (B); Nodo 2: server_2 (B) |
-
-**Configuración en docker-compose.yml:**
-
-```yaml
-services:
-  server_1:  # PRIMARY (primer servidor en registrarse)
-    volumes:
-      - ${FILES_SOURCE:-./runtime/files}:/tmp/source_files:ro  # Temporal
-      - ./runtime/logs:/app/logs  # Solo logs persistentes
-  
-  server_2:  # BACKUP
-    volumes:
-      - ${FILES_SOURCE:-./runtime/files}:/tmp/source_files:ro
-      - ./runtime/logs:/app/logs
-  
-  server_3:  # BACKUP
-    volumes:
-      - ${FILES_SOURCE:-./runtime/files}:/tmp/source_files:ro
-      - ./runtime/logs:/app/logs
-```
 
 ### 6.3 Mecanismo de Sincronización
 
@@ -769,16 +798,6 @@ def get_api_base_url() -> str:
     return os.getenv("API_BASE_URL", "http://localhost:8000")
 ```
 
-**3. Restart automático en Docker:**
-
-```yaml
-deploy:
-  restart_policy:
-    condition: on-failure
-    delay: 5s
-    max_attempts: 3
-```
-
 ### 7.4 Escenarios de Failover Probados
 
 **Escenario 1: Caída del PRIMARY**
@@ -894,7 +913,7 @@ access_logger.info(
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         DOCKER SWARM / COMPOSE                               │
+│                         DOCKER SWARM                                      │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────────┐│
 │  │                     NODO 1 (Manager)                                    ││
