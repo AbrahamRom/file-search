@@ -1,0 +1,105 @@
+@startuml organizacion_nodos
+
+!define PRIMARY_COLOR #90EE90
+!define BACKUP_COLOR #FFE4B5
+!define NODO1_BG #e3f2fd
+!define NODO2_BG #fff3e0
+
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam defaultFontSize 11
+skinparam dpi 150
+skinparam linetype ortho
+
+skinparam rectangle {
+    roundCorner 10
+}
+
+skinparam component {
+    BackgroundColor #B3E5FC
+    BorderColor #1976D2
+}
+
+skinparam database {
+    BackgroundColor #FFCDD2
+    BorderColor #C62828
+}
+
+skinparam folder {
+    BackgroundColor #FFF9C4
+    BorderColor #F9A825
+}
+
+title Organización de Procesos en Nodos Físicos\nDistribución PRIMARY-BACKUP para Alta Disponibilidad
+
+' ========== NODO 1 (Manager) ==========
+rectangle "**NODO 1 (Manager)**" as nodo1 NODO1_BG {
+    together {
+        ' Fila superior - PRIMARY
+        rectangle "client_1 **(PRIMARY)**\nPort: 8501" as client1 PRIMARY_COLOR {
+            component "Streamlit" as c1_st
+            component "DNS Resolver" as c1_dns
+        }
+        
+        rectangle "dns_1 **(PRIMARY)**\nPort: 5353" as dns1 PRIMARY_COLOR {
+            component "FastAPI" as d1_api
+            component "Coordinator" as d1_coord
+        }
+        
+        rectangle "server_1 **(PRIMARY)**\nPort: 8000" as server1 PRIMARY_COLOR {
+            component "FastAPI" as s1_api
+            database "SQLite DB" as s1_db
+            folder "/app/files" as s1_files
+        }
+    }
+    
+    together {
+        ' Fila inferior - BACKUP
+        rectangle "client_3 (BACKUP)\nPort: 8503" as client3 BACKUP_COLOR
+        
+        rectangle "dns_3 (BACKUP)\nPort: 5355" as dns3 BACKUP_COLOR
+        
+        rectangle "server_3 (BACKUP)\nPort: 8002" as server3 BACKUP_COLOR
+    }
+}
+
+' ========== NODO 2 (Worker) ==========
+rectangle "**NODO 2 (Worker)**" as nodo2 NODO2_BG {
+    together {
+        rectangle "client_2 (BACKUP)\nPort: 8502" as client2 BACKUP_COLOR {
+            component " " as c2_placeholder #FFFFFF/FFFFFF
+        }
+        
+        rectangle "dns_2 (BACKUP)\nPort: 5354" as dns2 BACKUP_COLOR {
+            component " " as d2_placeholder #FFFFFF/FFFFFF
+        }
+        
+        rectangle "server_2 (BACKUP)\nPort: 8001" as server2 BACKUP_COLOR {
+            component " " as s2_placeholder #FFFFFF/FFFFFF
+        }
+    }
+}
+
+' ========== LAYOUT HORIZONTAL ==========
+client1 -[hidden]right- dns1
+dns1 -[hidden]right- server1
+
+client3 -[hidden]right- dns3
+dns3 -[hidden]right- server3
+
+client2 -[hidden]right- dns2
+dns2 -[hidden]right- server2
+
+' ========== CONEXIÓN VISIBLE DE RED ==========
+nodo1 -[#3949AB,bold,dashed]down- nodo2 : "  **Red Overlay (file_search_net)**  "
+
+' ========== LEYENDA ==========
+legend right
+    |= Color |= Significado |
+    | <back:PRIMARY_COLOR>     </back> | PRIMARY (Nodo activo) |
+    | <back:BACKUP_COLOR>     </back> | BACKUP (Nodo de respaldo) |
+    | <back:NODO1_BG>     </back> | Nodo 1 - Manager |
+    | <back:NODO2_BG>     </back> | Nodo 2 - Worker |
+endlegend
+
+@enduml

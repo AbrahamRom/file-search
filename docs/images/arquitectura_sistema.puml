@@ -1,0 +1,101 @@
+@startuml arquitectura_sistema
+
+!define PRIMARY_COLOR #90EE90
+!define BACKUP_COLOR #FFE4B5
+!define CLIENT_BG #e8f4fc
+!define DNS_BG #f5eef8
+!define SERVER_BG #fdf2e9
+
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam defaultFontSize 11
+
+skinparam rectangle {
+    roundCorner 15
+}
+
+skinparam component {
+    BackgroundColor #B3E5FC
+    BorderColor #1976D2
+}
+
+skinparam database {
+    BackgroundColor #FFCDD2
+    BorderColor #C62828
+}
+
+skinparam folder {
+    BackgroundColor #FFF9C4
+    BorderColor #F9A825
+}
+
+title Arquitectura del Sistema Distribuido - File Search\nModelo PRIMARY-BACKUP con Alta Disponibilidad
+
+' ========== CAPA DE CLIENTE ==========
+rectangle "**CAPA DE CLIENTE (HA)**" as cliente_layer CLIENT_BG {
+    rectangle "Client Cluster (3 nodos)\n Interfaz web con resolución DNS y reintentos" as client_cluster #f0f8ff {
+        rectangle "client_1\n**(PRIMARY)**\nPuerto: 8501" as client1 PRIMARY_COLOR
+        rectangle "client_2\n(BACKUP)\nPuerto: 8502" as client2 BACKUP_COLOR
+        rectangle "client_3\n(BACKUP)\nPuerto: 8503" as client3 BACKUP_COLOR
+        
+        client1 <-[dashed]-> client2 : sync
+        client2 <-[dashed]-> client3 : sync
+    }
+ 
+}
+
+' ========== CAPA DE DNS ==========
+rectangle "**CAPA DE DNS (HA)**" as dns_layer DNS_BG {
+    rectangle "DNS Service Cluster (3 nodos)\n  Coordinación de roles y descubrimiento" as dns_cluster #faf0fa {
+        rectangle "dns_1\n**(PRIMARY)**\nPuerto: 5353" as dns1 PRIMARY_COLOR
+        rectangle "dns_2\n(BACKUP)\nPuerto: 5354" as dns2 BACKUP_COLOR
+        rectangle "dns_3\n(BACKUP)\nPuerto: 5355" as dns3 BACKUP_COLOR
+        
+        dns1 <-[dashed]-> dns2 : sync
+        dns2 <-[dashed]-> dns3 : sync
+    }
+    
+}
+
+' ========== CAPA DE SERVIDORES API ==========
+rectangle "**CAPA DE SERVIDORES API (HA)**" as server_layer SERVER_BG {
+    rectangle "API Server Cluster (3 nodos)\nCada servidor contiene: API + SQLite + Archivos\n Sincronización cada 10 segundos" as server_cluster #fef9e7 {
+        
+        rectangle "server_1 **(PRIMARY)**\nPort 8000" as server1_box PRIMARY_COLOR {
+            component "FastAPI" as s1_api
+            database "SQLite DB" as s1_db
+            folder "/app/files" as s1_files
+        }
+        
+        rectangle "server_2 (BACKUP)\nPort 8001" as server2_box BACKUP_COLOR {
+            component "FastAPI" as s2_api
+            database "SQLite DB" as s2_db
+            folder "/app/files" as s2_files
+        }
+        
+        rectangle "server_3 (BACKUP)\nPort 8002" as server3_box BACKUP_COLOR {
+            component "FastAPI" as s3_api
+            database "SQLite DB" as s3_db
+            folder "/app/files" as s3_files
+        }
+        
+        s1_db -[#e74c3c,bold]-> s2_db : sync
+        s2_db <-[#e74c3c,bold]- s3_db : sync
+        s1_files -[#27ae60,bold]-> s2_files
+        s2_files <-[#27ae60,bold]- s3_files
+    }
+    
+}
+
+' ========== CONEXIONES ENTRE CAPAS ==========
+client_cluster -[#3498db,bold]-> dns_cluster : "GET /server/resolve"
+dns_cluster -[#9b59b6,bold]-> server_cluster : "Coordinación\nde roles"
+
+' ========== LEYENDA ==========
+legend right
+    |= Color |= Significado |
+    | <back:PRIMARY_COLOR>     </back> | PRIMARY (Nodo activo) |
+    | <back:BACKUP_COLOR>     </back> | BACKUP (Nodo de respaldo) |
+endlegend
+
+@enduml

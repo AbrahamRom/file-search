@@ -1,0 +1,89 @@
+@startuml flujo_failover
+!theme plain
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName Arial
+skinparam defaultFontSize 11
+
+skinparam participant {
+    BackgroundColor #E3F2FD
+    BorderColor #1976D2
+    FontColor #0D47A1
+}
+
+skinparam note {
+    BackgroundColor #FFF9C4
+    BorderColor #F9A825
+}
+
+title Flujo de Failover - PRIMARY-BACKUP
+
+participant "server_1\n(PRIMARY)" as s1 #C8E6C9
+participant "server_2\n(BACKUP)" as s2 #FFECB3
+participant "server_3\n(BACKUP)" as s3 #FFECB3
+participant "dns_1\n(Coordinator)" as dns #E3F2FD
+
+== Estado Normal ==
+
+s1 -> dns : heartbeat 5s
+s2 -> dns : heartbeat 5s
+s3 -> dns : heartbeat 5s
+
+note right of dns
+  Todos los servidores
+  reportan estado OK
+end note
+
+== Fallo Detectado (15s sin heartbeat) ==
+
+s1 -[#FF0000]x dns : <color:#FF0000>X no responde</color>
+
+note right of dns #FFCDD2
+  seconds_since_heartbeat > 15
+  server_1 marcado como DOWN
+end note
+
+== Promoción Automática ==
+
+dns -> dns : promote_backup_to_primary()
+note right of dns #C8E6C9
+  server_2.role = "PRIMARY"
+end note
+
+== Notificación via Heartbeat ==
+
+s2 -> dns : heartbeat
+dns --> s2 : {role: "PRIMARY"}
+
+note over s2 #C8E6C9
+  _handle_role_change("PRIMARY")
+  stop SyncService
+end note
+
+s2 -[#C8E6C9]-> s2 : Ahora es PRIMARY
+
+== Reincorporación ==
+
+s1 -[#1976D2]-> dns : POST /server/register\n(reiniciado)
+
+note right of dns
+  Ya hay PRIMARY
+  Asignar BACKUP
+end note
+
+dns --> s1 : {role: "BACKUP"}
+
+note over s1 #FFECB3
+  start SyncService
+  sync desde server_2
+end note
+
+s1 -[#4CAF50,dashed]-> s2 : sync 10s
+
+legend right
+  |= Estado |= Significado |
+  |<#C8E6C9> | PRIMARY |
+  |<#FFECB3> | BACKUP |
+  |<#FFCDD2> | Fallo detectado |
+end legend
+
+@enduml

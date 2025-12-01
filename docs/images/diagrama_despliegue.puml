@@ -1,0 +1,94 @@
+@startuml diagrama_despliegue
+!theme plain
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName Arial
+skinparam defaultFontSize 10
+
+skinparam node {
+    BackgroundColor #E3F2FD
+    BorderColor #1976D2
+}
+
+skinparam rectangle {
+    BackgroundColor #FFFFFF
+    BorderColor #1976D2
+    RoundCorner 8
+}
+
+skinparam component {
+    BackgroundColor #E8F5E9
+    BorderColor #4CAF50
+}
+
+skinparam database {
+    BackgroundColor #FFF3E0
+    BorderColor #FF9800
+}
+
+title Diagrama de Despliegue - Docker Swarm
+
+node "Docker Swarm" as swarm #F5F5F5 {
+    
+    node "NODO 1 (Manager)" as nodo1 #E3F2FD {
+        
+        rectangle "client_1 (PRIMARY)\nPort: 8501" as c1 #C8E6C9 {
+            component "Streamlit" as st1
+            component "DNS Resolver" as dns_r1
+        }
+        
+        rectangle "dns_1 (PRIMARY)\nPort: 5353" as d1 #C8E6C9 {
+            component "FastAPI" as fa_d1
+            component "Coordinator" as coord1
+        }
+        
+        rectangle "server_1 (PRIMARY)\nPort: 8000" as s1 #C8E6C9 {
+            component "FastAPI" as fa_s1
+            database "SQLite" as db1
+            folder "/app/files" as files1
+        }
+        
+        rectangle "client_3 (BACKUP)\nPort: 8503" as c3 #FFECB3
+        rectangle "dns_3 (BACKUP)\nPort: 5355" as d3 #FFECB3
+        rectangle "server_3 (BACKUP)\nPort: 8002" as s3 #FFECB3 {
+            component "SyncService\n10s" as sync3
+        }
+    }
+    
+    node "NODO 2 (Worker)" as nodo2 #E3F2FD {
+        
+        rectangle "client_2 (BACKUP)\nPort: 8502" as c2 #FFECB3 {
+            component "Streamlit" as st2
+            component "DNS Resolver" as dns_r2
+        }
+        
+        rectangle "dns_2 (BACKUP)\nPort: 5354" as d2 #FFECB3 {
+            component "FastAPI" as fa_d2
+            component "State Sync" as sync_d2
+        }
+        
+        rectangle "server_2 (BACKUP)\nPort: 8001" as s2 #FFECB3 {
+            component "FastAPI" as fa_s2
+            component "SyncService\n10s" as sync2
+            database "SQLite\n(sync)" as db2
+        }
+    }
+    
+    database "Volumen Compartido\n./runtime/logs:/app/logs" as logs #FFF9C4
+}
+
+' Conexiones de red overlay
+nodo1 -[hidden]down- nodo2
+nodo1 <-[#1976D2,dashed]down-> nodo2 : Red Overlay\n(file_search_net)
+
+' Sincronización
+s1 -[#4CAF50,dashed]-> s2 : sync
+s1 -[#4CAF50,dashed]-> s3 : sync
+
+legend right
+  |= Color |= Significado |
+  |<#C8E6C9> | PRIMARY |
+  |<#FFECB3> | BACKUP |
+  |<#4CAF50> | Sincronización |
+end legend
+
+@enduml

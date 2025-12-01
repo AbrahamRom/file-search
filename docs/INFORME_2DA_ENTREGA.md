@@ -22,50 +22,7 @@
 
 El sistema **File Search** está diseñado siguiendo una arquitectura de **microservicios con alta disponibilidad** desplegada sobre una infraestructura Docker Swarm. La arquitectura implementa un modelo **PRIMARY-BACKUP** con failover automático, organizada en tres capas principales:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      CAPA DE CLIENTE (HA)                       │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │              Client Cluster (3 nodos)                   │    │
-│  │   client_1 (PRIMARY) ◀──▶ client_2, client_3 (BACKUP)   │    │
-│  │                    Puerto: 8501                         │    │
-│  │     Interfaz web con resolución DNS y reintentos        │    │
-│  └─────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      CAPA DE DNS (HA)                           │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │              DNS Service Cluster (3 nodos)              │    │
-│  │      dns_1 (PRIMARY) ◀──▶ dns_2, dns_3 (BACKUP)         │    │
-│  │                   Puertos: 5353, 5354, 5355             │    │
-│  │          Coordinación de roles y descubrimiento         │    │
-│  └─────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                    Coordinación de roles
-                              ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                 CAPA DE SERVIDORES API (HA)                      │
-│  ┌──────────────────────────────────────────────────────────┐    │
-│  │             API Server Cluster (3 nodos)                 │    │
-│  │   Cada servidor contiene: API + SQLite + Archivos        │    │
-│  │                                                          │    │
-│  │  ┌───────────────┐   ┌───────────────┐  ┌─────────────┐  │    │
-│  │  │   server_1    │   │   server_2    │  │  server_3   │  │    │
-│  │  │   (PRIMARY)   │   │   (BACKUP)    │  │  (BACKUP)   │  │    │
-│  │  │ ┌───────────┐ │   │ ┌───────────┐ │  │ ┌─────────┐ │  │    │
-│  │  │ │ FastAPI   │ │   │ │ FastAPI   │ │  │ │ FastAPI │ │  │    │
-│  │  │ │ SQLite DB │ │──▶│ │ SQLite DB │ │  │ │SQLite DB│ │  │    │
-│  │  │ │ /app/files│ │   │ │ /app/files│ │◀─│ │app/files│ │  │    │
-│  │  │ └───────────┘ │   │ └───────────┘ │  │ └─────────┘ │  │    │
-│  │  │   Port 8000   │   │   Port 8001   │  │  Port 8002  │  │    │
-│  │  └───────────────┘   └───────────────┘  └─────────────┘  │    │
-│  │              Sincronización cada 10 segundos             │    │
-│  └──────────────────────────────────────────────────────────┘    │
-└──────────────────────────────────────────────────────────────────┘
-```
+![Arquitectura del Sistema Distribuido - File Search](images/arquitectura_sistema.svg)
 
 ### 1.2 Roles del Sistema
 
@@ -262,36 +219,7 @@ El sistema utiliza **REST (Representational State Transfer)** como protocolo pri
 
 El sistema cuenta con **3 clientes**, **3 servicios DNS** y **3 servidores API**, todos con modelo PRIMARY-BACKUP distribuidos en 2 nodos físicos:
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  CAPA CLIENTE (HA)                                                          │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐           │
-│  │ client_1 (PRIMARY)│  │ client_2 (BACKUP)│  │ client_3 (BACKUP)│           │
-│  │     Nodo 1       │  │     Nodo 2       │  │     Nodo 1       │           │
-│  └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘           │
-└───────────┼─────────────────────┼─────────────────────┼─────────────────────┘
-            │                     │                     │
-            └─────────────────────┼─────────────────────┘
-                                  │ GET /server/resolve
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  CAPA DNS (HA)                                                              │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐           │
-│  │ dns_1 (PRIMARY)  │◀─┤ dns_2 (BACKUP)   │◀─┤ dns_3 (BACKUP)   │           │
-│  │     Nodo 1       │  │     Nodo 2       │  │     Nodo 1       │           │
-│  └────────┬─────────┘  └──────────────────┘  └──────────────────┘           │
-└───────────┼─────────────────────────────────────────────────────────────────┘
-            │ {server_id, url, role}
-            ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  CAPA SERVIDORES API (HA)                                                   │
-│  ┌──────────────────────┐  ┌──────────────────┐  ┌──────────────────┐       │
-│  │ server_1 (PRIMARY)   │──┤ server_2 (BACKUP)│──┤ server_3 (BACKUP)│       │
-│  │ API + SQLite + Files │  │ sync cada 10s    │  │ sync cada 10s    │       │
-│  │     Nodo 1           │  │     Nodo 2       │  │     Nodo 1       │       │
-│  └──────────────────────┘  └──────────────────┘  └──────────────────┘       │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+![Comunicación Cliente-Servidor con Alta Disponibilidad](images/comunicacion_capas.svg)
 
 **Endpoints principales:**
 
@@ -366,28 +294,7 @@ El sistema implementa un mecanismo de coordinación centralizada a través del s
 
 **Flujo de asignación de roles:**
 
-```
-┌─────────────┐     1. POST /server/register      ┌─────────────┐
-│  Server N   │ ─────────────────────────────────▶│     DNS     │
-│  (startup)  │     {server_id, ip, port}         │   Service   │
-└─────────────┘                                    └─────────────┘
-       │                                                  │
-       │                                                  ▼
-       │         2. Response: {role: PRIMARY|BACKUP}     ┌─────────────┐
-       │ ◀─────────────────────────────────────────────  │  Evaluación │
-       │                                                  │  ¿Hay otro  │
-       │                                                  │  PRIMARY?   │
-       ▼                                                  └─────────────┘
-┌─────────────────────────────────────────────────────────┐
-│  Si role == PRIMARY:                                    │
-│    - Atender todas las peticiones                       │
-│    - Servir datos a los BACKUPs                         │
-│                                                         │
-│  Si role == BACKUP:                                     │
-│    - Iniciar SyncService                                │
-│    - Sincronizar DB y archivos cada 10 segundos         │
-└─────────────────────────────────────────────────────────┘
-```
+![Flujo de Asignación de Roles (PRIMARY-BACKUP)](images/asignacion_roles.svg)
 
 ### 4.2 Detección de Fallos mediante Heartbeats
 
@@ -609,38 +516,7 @@ class DNSClient:
 
 El sistema implementa replicación completa con un modelo PRIMARY-BACKUP:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    ARQUITECTURA DE DATOS                     │
-│                                                              │
-│  ┌─────────────────┐     ┌─────────────────┐                │
-│  │   Server 1      │     │   Server 2      │                │
-│  │   (PRIMARY)     │────▶│   (BACKUP)      │                │
-│  │ ┌─────────────┐ │sync │ ┌─────────────┐ │                │
-│  │ │ SQLite DB   │ │ 10s │ │ SQLite DB   │ │                │
-│  │ │ (12 KB)     │ │────▶│ │ (12 KB)     │ │                │
-│  │ └─────────────┘ │     │ └─────────────┘ │                │
-│  │ ┌─────────────┐ │     │ ┌─────────────┐ │                │
-│  │ │ /app/files  │ │────▶│ │ /app/files  │ │                │
-│  │ │ (interno)   │ │     │ │ (interno)   │ │                │
-│  │ └─────────────┘ │     │ └─────────────┘ │                │
-│  └─────────────────┘     └─────────────────┘                │
-│           │                      ▲                          │
-│           │      sync 10s        │                          │
-│           └──────────────────────┼──────────────────┐       │
-│                                  │                  │       │
-│                          ┌───────┴───────┐          │       │
-│                          │   Server 3    │          │       │
-│                          │   (BACKUP)    │◀─────────┘       │
-│                          │ ┌───────────┐ │                  │
-│                          │ │ SQLite DB │ │                  │
-│                          │ └───────────┘ │                  │
-│                          │ ┌───────────┐ │                  │
-│                          │ │ /app/files│ │                  │
-│                          │ └───────────┘ │                  │
-│                          └───────────────┘                  │
-└─────────────────────────────────────────────────────────────┘
-```
+![Arquitectura de Datos - Replicación PRIMARY-BACKUP](images/arquitectura_datos.svg)
 
 **Características del almacenamiento:**
 
@@ -911,95 +787,11 @@ access_logger.info(
 
 ## Diagrama de Despliegue
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         DOCKER SWARM                                      │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                     NODO 1 (Manager)                                    ││
-│  │                                                                          ││
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐  ││
-│  │  │ client_1        │  │ dns_1           │  │ server_1                │  ││
-│  │  │ (PRIMARY)       │  │ (PRIMARY)       │  │ (PRIMARY)               │  ││
-│  │  │ Port: 8501      │  │ Port: 5353      │  │ Port: 8000              │  ││
-│  │  │                 │  │                 │  │ ┌─────────┐ ┌─────────┐ │  ││
-│  │  │ Streamlit +     │  │ FastAPI +       │  │ │ FastAPI │ │ SQLite  │ │  ││
-│  │  │ DNS Resolver    │  │ Coordinator     │  │ │ + Files │ │  (DB)   │ │  ││
-│  │  └─────────────────┘  └─────────────────┘  │ └─────────┘ └─────────┘ │  ││
-│  │                                            └─────────────────────────┘  ││
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐  ││
-│  │  │ client_3        │  │ dns_3           │  │ server_3                │  ││
-│  │  │ (BACKUP)        │  │ (BACKUP)        │  │ (BACKUP)                │  ││
-│  │  │ Port: 8503      │  │ Port: 5355      │  │ Port: 8002              │  ││
-│  │  │                 │  │                 │  │ SyncService cada 10s    │  ││
-│  │  └─────────────────┘  └─────────────────┘  └─────────────────────────┘  ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
-│                                     │                                        │
-│                     Red Overlay (file_search_net)                            │
-│                                     │                                        │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                     NODO 2 (Worker)                                     ││
-│  │                                                                          ││
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐  ││
-│  │  │ client_2        │  │ dns_2           │  │ server_2                │  ││
-│  │  │ (BACKUP)        │  │ (BACKUP)        │  │ (BACKUP)                │  ││
-│  │  │ Port: 8502      │  │ Port: 5354      │  │ Port: 8001              │  ││
-│  │  │                 │  │                 │  │                         │  ││
-│  │  │ Streamlit +     │  │ FastAPI +       │  │ ┌─────────┐ ┌─────────┐ │  ││
-│  │  │ DNS Resolver    │  │ State Sync      │  │ │ FastAPI │ │ SQLite  │ │  ││
-│  │  │                 │  │                 │  │ │ SyncSvc │ │ (sync)  │ │  ││
-│  │  └─────────────────┘  └─────────────────┘  │ └─────────┘ └─────────┘ │  ││
-│  │                                            └─────────────────────────┘  ││
-│  │                                                                          ││
-│  │  Sincronización desde PRIMARY cada 10 segundos                           ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
-│                                                                              │
-│  ┌──────────────────────────────────────────────────────────────────────────┐│
-│  │                      VOLUMEN COMPARTIDO (solo logs)                      ││
-│  │                         ./runtime/logs:/app/logs                          ││
-│  └──────────────────────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+![Diagrama de Despliegue - Docker Swarm](images/diagrama_despliegue.svg)
 
 ### Flujo de Failover
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                         FLUJO DE FAILOVER                                 │
-│                                                                           │
-│   ESTADO NORMAL                                                           │
-│   ═══════════                                                             │
-│   server_1 (PRIMARY) ───heartbeat 5s───▶ dns_1                           │
-│   server_2 (BACKUP)  ───heartbeat 5s───▶ dns_1                           │
-│   server_3 (BACKUP)  ───heartbeat 5s───▶ dns_1                           │
-│                                                                           │
-│   FALLO DETECTADO (15s sin heartbeat)                                     │
-│   ═════════════════════════════════════                                   │
-│   server_1 ──── X ────▶ dns_1 (no responde)                              │
-│                                                                           │
-│   DNS detecta: seconds_since_heartbeat > 15                               │
-│                                                                           │
-│   PROMOCIÓN AUTOMÁTICA                                                    │
-│   ════════════════════                                                    │
-│   dns_1: promote_backup_to_primary()                                      │
-│          server_2.role = "PRIMARY"                                        │
-│                                                                           │
-│   NOTIFICACIÓN VIA HEARTBEAT                                              │
-│   ═════════════════════════                                               │
-│   server_2 ◀──── {role: "PRIMARY"} ──── dns_1                            │
-│   server_2: _handle_role_change("PRIMARY")                                │
-│             stop SyncService                                              │
-│                                                                           │
-│   REINCORPORACIÓN                                                         │
-│   ══════════════                                                          │
-│   server_1 (reiniciado) ───POST /server/register───▶ dns_1               │
-│   dns_1: Ya hay PRIMARY, asignar BACKUP                                   │
-│   server_1 ◀──── {role: "BACKUP"} ──── dns_1                             │
-│   server_1: start SyncService                                             │
-│             sync desde server_2 (nuevo PRIMARY)                           │
-│                                                                           │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+![Flujo de Failover](images/flujo_failover.svg)
 
 ---
 

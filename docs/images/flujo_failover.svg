@@ -1,0 +1,330 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" contentStyleType="text/css" height="1050px" preserveAspectRatio="none" style="width:616px;height:1050px;background:#FAFAFA;" version="1.1" viewBox="0 0 616 1050" width="616px" zoomAndPan="magnify"><defs/><g><rect fill="#FAFAFA" height="35.6094" id="_title" style="stroke:#FAFAFA;stroke-width:0.0;" width="468" x="72.5" y="10"/><text fill="#000000" font-family="Arial" font-size="22" font-weight="bold" lengthAdjust="spacing" textLength="458" x="77.5" y="35.4209">Flujo de Failover - PRIMARY-BACKUP</text><line style="stroke:#000000;stroke-width:1.0;stroke-dasharray:5.0,5.0;" x1="79" x2="79" y1="92.2188" y2="910.75"/><line style="stroke:#000000;stroke-width:1.0;stroke-dasharray:5.0,5.0;" x1="177" x2="177" y1="92.2188" y2="910.75"/><line style="stroke:#000000;stroke-width:1.0;stroke-dasharray:5.0,5.0;" x1="293" x2="293" y1="92.2188" y2="910.75"/><line style="stroke:#000000;stroke-width:1.0;stroke-dasharray:5.0,5.0;" x1="401" x2="401" y1="92.2188" y2="910.75"/><rect fill="#C8E6C9" height="39.6094" rx="2.5" ry="2.5" style="stroke:#1976D2;stroke-width:1.0;" width="69" x="45" y="51.6094"/><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="50" x="54.5" y="68.8198">server_1</text><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="55" x="52" y="81.6245">(PRIMARY)</text><rect fill="#C8E6C9" height="39.6094" rx="2.5" ry="2.5" style="stroke:#1976D2;stroke-width:1.0;" width="69" x="45" y="909.75"/><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="50" x="54.5" y="926.9604">server_1</text><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="55" x="52" y="939.7651">(PRIMARY)</text><rect fill="#FFECB3" height="39.6094" rx="2.5" ry="2.5" style="stroke:#1976D2;stroke-width:1.0;" width="67" x="144" y="51.6094"/><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="50" x="152.5" y="68.8198">server_2</text><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="53" x="151" y="81.6245">(BACKUP)</text><rect fill="#FFECB3" height="39.6094" rx="2.5" ry="2.5" style="stroke:#1976D2;stroke-width:1.0;" width="67" x="144" y="909.75"/><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="50" x="152.5" y="926.9604">server_2</text><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="53" x="151" y="939.7651">(BACKUP)</text><rect fill="#FFECB3" height="39.6094" rx="2.5" ry="2.5" style="stroke:#1976D2;stroke-width:1.0;" width="67" x="260" y="51.6094"/><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="50" x="268.5" y="68.8198">server_3</text><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="53" x="267" y="81.6245">(BACKUP)</text><rect fill="#FFECB3" height="39.6094" rx="2.5" ry="2.5" style="stroke:#1976D2;stroke-width:1.0;" width="67" x="260" y="909.75"/><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="50" x="268.5" y="926.9604">server_3</text><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="53" x="267" y="939.7651">(BACKUP)</text><rect fill="#E3F2FD" height="39.6094" rx="2.5" ry="2.5" style="stroke:#1976D2;stroke-width:1.0;" width="89" x="357" y="51.6094"/><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="34" x="384.5" y="68.8198">dns_1</text><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="75" x="364" y="81.6245">(Coordinator)</text><rect fill="#E3F2FD" height="39.6094" rx="2.5" ry="2.5" style="stroke:#1976D2;stroke-width:1.0;" width="89" x="357" y="909.75"/><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="34" x="384.5" y="926.9604">dns_1</text><text fill="#0D47A1" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="75" x="364" y="939.7651">(Coordinator)</text><rect fill="#FFFFFF" height="3" style="stroke:#FFFFFF;stroke-width:1.0;" width="604" x="5" y="121.6211"/><line style="stroke:#000000;stroke-width:0.5;" x1="5" x2="609" y1="121.6211" y2="121.6211"/><line style="stroke:#000000;stroke-width:0.5;" x1="5" x2="609" y1="124.6211" y2="124.6211"/><rect fill="#FFFFFF" height="20.8047" style="stroke:#000000;stroke-width:1.0;" width="111" x="251.5" y="112.2188"/><text fill="#000000" font-family="Arial" font-size="11" font-weight="bold" lengthAdjust="spacing" textLength="93" x="257.5" y="126.4292">Estado Normal</text><polygon fill="#000000" points="389.5,157.8281,399.5,161.8281,389.5,165.8281,393.5,161.8281" style="stroke:#000000;stroke-width:1.0;"/><line style="stroke:#000000;stroke-width:1.0;" x1="79.5" x2="395.5" y1="161.8281" y2="161.8281"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="73" x="86.5" y="157.2339">heartbeat 5s</text><polygon fill="#000000" points="389.5,184.6328,399.5,188.6328,389.5,192.6328,393.5,188.6328" style="stroke:#000000;stroke-width:1.0;"/><line style="stroke:#000000;stroke-width:1.0;" x1="177.5" x2="395.5" y1="188.6328" y2="188.6328"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="73" x="184.5" y="184.0386">heartbeat 5s</text><polygon fill="#000000" points="389.5,211.4375,399.5,215.4375,389.5,219.4375,393.5,215.4375" style="stroke:#000000;stroke-width:1.0;"/><line style="stroke:#000000;stroke-width:1.0;" x1="293.5" x2="395.5" y1="215.4375" y2="215.4375"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="73" x="300.5" y="210.8433">heartbeat 5s</text><path d="M406,228.4375 L406,263.4375 L548,263.4375 L548,238.4375 L538,228.4375 L406,228.4375 " fill="#FFF9C4" style="stroke:#000000;stroke-width:1.0;"/><path d="M538,228.4375 L538,238.4375 L548,238.4375 L538,228.4375 " fill="#FFF9C4" style="stroke:#000000;stroke-width:1.0;"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="121" x="412" y="243.6479">Todos los servidores</text><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="112" x="412" y="256.4526">reportan estado OK</text><rect fill="#FFFFFF" height="3" style="stroke:#FFFFFF;stroke-width:1.0;" width="604" x="5" y="288.4492"/><line style="stroke:#000000;stroke-width:0.5;" x1="5" x2="609" y1="288.4492" y2="288.4492"/><line style="stroke:#000000;stroke-width:0.5;" x1="5" x2="609" y1="291.4492" y2="291.4492"/><rect fill="#FFFFFF" height="20.8047" style="stroke:#000000;stroke-width:1.0;" width="247" x="183.5" y="279.0469"/><text fill="#000000" font-family="Arial" font-size="11" font-weight="bold" lengthAdjust="spacing" textLength="229" x="189.5" y="293.2573">Fallo Detectado (15s sin heartbeat)</text><line style="stroke:#FF0000;stroke-width:2.0;" x1="383.5" x2="393.5" y1="323.6563" y2="333.6563"/><line style="stroke:#FF0000;stroke-width:2.0;" x1="383.5" x2="393.5" y1="333.6563" y2="323.6563"/><line style="stroke:#FF0000;stroke-width:1.0;" x1="79.5" x2="388.5" y1="328.6563" y2="328.6563"/><text fill="#FF0000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="83" x="86.5" y="324.062">X no responde</text><path d="M406,341.6563 L406,376.6563 L604,376.6563 L604,351.6563 L594,341.6563 L406,341.6563 " fill="#FFCDD2" style="stroke:#000000;stroke-width:1.0;"/><path d="M594,341.6563 L594,351.6563 L604,351.6563 L594,341.6563 " fill="#FFCDD2" style="stroke:#000000;stroke-width:1.0;"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="176" x="412" y="356.8667">seconds_since_heartbeat &gt; 15</text><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="177" x="412" y="369.6714">server_1 marcado como DOWN</text><rect fill="#FFFFFF" height="3" style="stroke:#FFFFFF;stroke-width:1.0;" width="604" x="5" y="401.668"/><line style="stroke:#000000;stroke-width:0.5;" x1="5" x2="609" y1="401.668" y2="401.668"/><line style="stroke:#000000;stroke-width:0.5;" x1="5" x2="609" y1="404.668" y2="404.668"/><rect fill="#FFFFFF" height="20.8047" style="stroke:#000000;stroke-width:1.0;" width="161" x="226.5" y="392.2656"/><text fill="#000000" font-family="Arial" font-size="11" font-weight="bold" lengthAdjust="spacing" textLength="143" x="232.5" y="406.4761">Promoción Automática</text><line style="stroke:#000000;stroke-width:1.0;" x1="401.5" x2="443.5" y1="441.875" y2="441.875"/><line style="stroke:#000000;stroke-width:1.0;" x1="443.5" x2="443.5" y1="441.875" y2="454.875"/><line style="stroke:#000000;stroke-width:1.0;" x1="402.5" x2="443.5" y1="454.875" y2="454.875"/><polygon fill="#000000" points="412.5,450.875,402.5,454.875,412.5,458.875,408.5,454.875" style="stroke:#000000;stroke-width:1.0;"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="169" x="408.5" y="437.2808">promote_backup_to_primary()</text><path d="M406,467.875 L406,489.875 L577,489.875 L577,477.875 L567,467.875 L406,467.875 " fill="#C8E6C9" style="stroke:#000000;stroke-width:1.0;"/><path d="M567,467.875 L567,477.875 L577,477.875 L567,467.875 " fill="#C8E6C9" style="stroke:#000000;stroke-width:1.0;"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="150" x="412" y="483.0854">server_2.role = "PRIMARY"</text><rect fill="#FFFFFF" height="3" style="stroke:#FFFFFF;stroke-width:1.0;" width="604" x="5" y="515.082"/><line style="stroke:#000000;stroke-width:0.5;" x1="5" x2="609" y1="515.082" y2="515.082"/><line style="stroke:#000000;stroke-width:0.5;" x1="5" x2="609" y1="518.082" y2="518.082"/><rect fill="#FFFFFF" height="20.8047" style="stroke:#000000;stroke-width:1.0;" width="186" x="214" y="505.6797"/><text fill="#000000" font-family="Arial" font-size="11" font-weight="bold" lengthAdjust="spacing" textLength="168" x="220" y="519.8901">Notificación via Heartbeat</text><polygon fill="#000000" points="389.5,551.2891,399.5,555.2891,389.5,559.2891,393.5,555.2891" style="stroke:#000000;stroke-width:1.0;"/><line style="stroke:#000000;stroke-width:1.0;" x1="177.5" x2="395.5" y1="555.2891" y2="555.2891"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="55" x="184.5" y="550.6948">heartbeat</text><polygon fill="#000000" points="188.5,578.0938,178.5,582.0938,188.5,586.0938,184.5,582.0938" style="stroke:#000000;stroke-width:1.0;"/><line style="stroke:#000000;stroke-width:1.0;stroke-dasharray:2.0,2.0;" x1="182.5" x2="400.5" y1="582.0938" y2="582.0938"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="101" x="194.5" y="577.4995">{role: "PRIMARY"}</text><path d="M75,595.0938 L75,630.0938 L280,630.0938 L280,605.0938 L270,595.0938 L75,595.0938 " fill="#C8E6C9" style="stroke:#000000;stroke-width:1.0;"/><path d="M270,595.0938 L270,605.0938 L280,605.0938 L270,595.0938 " fill="#C8E6C9" style="stroke:#000000;stroke-width:1.0;"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="184" x="81" y="610.3042">_handle_role_change("PRIMARY")</text><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="98" x="81" y="623.1089">stop SyncService</text><line style="stroke:#C8E6C9;stroke-width:1.0;stroke-dasharray:2.0,2.0;" x1="177.5" x2="219.5" y1="654.5078" y2="654.5078"/><line style="stroke:#C8E6C9;stroke-width:1.0;stroke-dasharray:2.0,2.0;" x1="219.5" x2="219.5" y1="654.5078" y2="667.5078"/><line style="stroke:#C8E6C9;stroke-width:1.0;stroke-dasharray:2.0,2.0;" x1="178.5" x2="219.5" y1="667.5078" y2="667.5078"/><polygon fill="#C8E6C9" points="188.5,663.5078,178.5,667.5078,188.5,671.5078,184.5,667.5078" style="stroke:#C8E6C9;stroke-width:1.0;"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="102" x="184.5" y="649.9136">Ahora es PRIMARY</text><rect fill="#FFFFFF" height="3" style="stroke:#FFFFFF;stroke-width:1.0;" width="604" x="5" y="694.9102"/><line style="stroke:#000000;stroke-width:0.5;" x1="5" x2="609" y1="694.9102" y2="694.9102"/><line style="stroke:#000000;stroke-width:0.5;" x1="5" x2="609" y1="697.9102" y2="697.9102"/><rect fill="#FFFFFF" height="20.8047" style="stroke:#000000;stroke-width:1.0;" width="122" x="246" y="685.5078"/><text fill="#000000" font-family="Arial" font-size="11" font-weight="bold" lengthAdjust="spacing" textLength="104" x="252" y="699.7183">Reincorporación</text><polygon fill="#1976D2" points="389.5,743.9219,399.5,747.9219,389.5,751.9219,393.5,747.9219" style="stroke:#1976D2;stroke-width:1.0;"/><line style="stroke:#1976D2;stroke-width:1.0;stroke-dasharray:2.0,2.0;" x1="79.5" x2="395.5" y1="747.9219" y2="747.9219"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="125" x="86.5" y="730.5229">POST /server/register</text><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="63" x="86.5" y="743.3276">(reiniciado)</text><path d="M406,760.9219 L406,795.9219 L519,795.9219 L519,770.9219 L509,760.9219 L406,760.9219 " fill="#FFF9C4" style="stroke:#000000;stroke-width:1.0;"/><path d="M509,760.9219 L509,770.9219 L519,770.9219 L509,760.9219 " fill="#FFF9C4" style="stroke:#000000;stroke-width:1.0;"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="89" x="412" y="776.1323">Ya hay PRIMARY</text><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="92" x="412" y="788.937">Asignar BACKUP</text><polygon fill="#000000" points="90.5,816.3359,80.5,820.3359,90.5,824.3359,86.5,820.3359" style="stroke:#000000;stroke-width:1.0;"/><line style="stroke:#000000;stroke-width:1.0;stroke-dasharray:2.0,2.0;" x1="84.5" x2="400.5" y1="820.3359" y2="820.3359"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="99" x="96.5" y="815.7417">{role: "BACKUP"}</text><path d="M10,833.3359 L10,868.3359 L150,868.3359 L150,843.3359 L140,833.3359 L10,833.3359 " fill="#FFECB3" style="stroke:#000000;stroke-width:1.0;"/><path d="M140,833.3359 L140,843.3359 L150,843.3359 L140,833.3359 " fill="#FFECB3" style="stroke:#000000;stroke-width:1.0;"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="100" x="16" y="848.5464">start SyncService</text><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="119" x="16" y="861.3511">sync desde server_2</text><polygon fill="#4CAF50" points="165.5,888.75,175.5,892.75,165.5,896.75,169.5,892.75" style="stroke:#4CAF50;stroke-width:1.0;"/><line style="stroke:#4CAF50;stroke-width:1.0;stroke-dasharray:2.0,2.0;" x1="79.5" x2="171.5" y1="892.75" y2="892.75"/><text fill="#000000" font-family="Arial" font-size="11" lengthAdjust="spacing" textLength="51" x="86.5" y="888.1558">sync 10s</text><rect fill="#FAFAFA" height="81.1875" id="_legend" rx="7.5" ry="7.5" style="stroke:#000000;stroke-width:1.0;" width="189" x="414" y="956.3594"/><text fill="#000000" font-family="Arial" font-size="14" font-weight="bold" lengthAdjust="spacing" textLength="53" x="425" y="977.3545">Estado</text><text fill="#000000" font-family="Arial" font-size="14" font-weight="bold" lengthAdjust="spacing" textLength="86" x="488" y="977.3545">Significado</text><rect fill="#C8E6C9" height="16.2969" style="stroke:none;stroke-width:1.0;" width="63" x="420" y="980.6563"/><text fill="#000000" font-family="Arial" font-size="14" lengthAdjust="spacing" textLength="4" x="420" y="993.6514"> </text><text fill="#000000" font-family="Arial" font-size="14" lengthAdjust="spacing" textLength="62" x="487" y="993.6514">PRIMARY</text><rect fill="#FFECB3" height="16.2969" style="stroke:none;stroke-width:1.0;" width="63" x="420" y="996.9531"/><text fill="#000000" font-family="Arial" font-size="14" lengthAdjust="spacing" textLength="4" x="420" y="1009.9482"> </text><text fill="#000000" font-family="Arial" font-size="14" lengthAdjust="spacing" textLength="57" x="487" y="1009.9482">BACKUP</text><rect fill="#FFCDD2" height="16.2969" style="stroke:none;stroke-width:1.0;" width="63" x="420" y="1013.25"/><text fill="#000000" font-family="Arial" font-size="14" lengthAdjust="spacing" textLength="4" x="420" y="1026.2451"> </text><text fill="#000000" font-family="Arial" font-size="14" lengthAdjust="spacing" textLength="106" x="487" y="1026.2451">Fallo detectado</text><line style="stroke:#000000;stroke-width:1.0;" x1="420" x2="597" y1="964.3594" y2="964.3594"/><line style="stroke:#000000;stroke-width:1.0;" x1="420" x2="597" y1="980.6563" y2="980.6563"/><line style="stroke:#000000;stroke-width:1.0;" x1="420" x2="597" y1="996.9531" y2="996.9531"/><line style="stroke:#000000;stroke-width:1.0;" x1="420" x2="597" y1="1013.25" y2="1013.25"/><line style="stroke:#000000;stroke-width:1.0;" x1="420" x2="597" y1="1029.5469" y2="1029.5469"/><line style="stroke:#000000;stroke-width:1.0;" x1="420" x2="420" y1="964.3594" y2="1029.5469"/><line style="stroke:#000000;stroke-width:1.0;" x1="483" x2="483" y1="964.3594" y2="1029.5469"/><line style="stroke:#000000;stroke-width:1.0;" x1="597" x2="597" y1="964.3594" y2="1029.5469"/><!--MD5=[644094fd565c269c54dc0bd05c2be8dd]
+@startuml
+!theme plain
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName Arial
+skinparam defaultFontSize 11
+
+skinparam participant {
+    BackgroundColor #E3F2FD
+    BorderColor #1976D2
+    FontColor #0D47A1
+}
+
+skinparam note {
+    BackgroundColor #FFF9C4
+    BorderColor #F9A825
+}
+
+title Flujo de Failover - PRIMARY-BACKUP
+
+participant "server_1\n(PRIMARY)" as s1 #C8E6C9
+participant "server_2\n(BACKUP)" as s2 #FFECB3
+participant "server_3\n(BACKUP)" as s3 #FFECB3
+participant "dns_1\n(Coordinator)" as dns #E3F2FD
+
+== Estado Normal ==
+
+s1 -> dns : heartbeat 5s
+s2 -> dns : heartbeat 5s
+s3 -> dns : heartbeat 5s
+
+note right of dns
+  Todos los servidores
+  reportan estado OK
+end note
+
+== Fallo Detectado (15s sin heartbeat) ==
+
+s1 -[#FF0000]x dns : <color:#FF0000>X no responde</color>
+
+note right of dns #FFCDD2
+  seconds_since_heartbeat > 15
+  server_1 marcado como DOWN
+end note
+
+== Promoción Automática ==
+
+dns -> dns : promote_backup_to_primary()
+note right of dns #C8E6C9
+  server_2.role = "PRIMARY"
+end note
+
+== Notificación via Heartbeat ==
+
+s2 -> dns : heartbeat
+dns - -> s2 : {role: "PRIMARY"}
+
+note over s2 #C8E6C9
+  _handle_role_change("PRIMARY")
+  stop SyncService
+end note
+
+s2 -[#C8E6C9]-> s2 : Ahora es PRIMARY
+
+== Reincorporación ==
+
+s1 -[#1976D2]-> dns : POST /server/register\n(reiniciado)
+
+note right of dns
+  Ya hay PRIMARY
+  Asignar BACKUP
+end note
+
+dns - -> s1 : {role: "BACKUP"}
+
+note over s1 #FFECB3
+  start SyncService
+  sync desde server_2
+end note
+
+s1 -[#4CAF50,dashed]-> s2 : sync 10s
+
+legend right
+  |= Estado |= Significado |
+  |<#C8E6C9> | PRIMARY |
+  |<#FFECB3> | BACKUP |
+  |<#FFCDD2> | Fallo detectado |
+end legend
+@enduml
+
+@startuml
+
+
+
+
+
+
+
+<style>
+  root {
+    BackgroundColor white
+    FontColor black
+    FontName Verdana
+    HyperLinkColor blue
+    LineColor black
+    LineThickness 1
+    Margin 5
+  }
+  caption {
+    LineThickness 0
+  }
+  footer {
+    LineThickness 0
+  }
+  header {
+    LineThickness 0
+  }
+  node {
+    MaximumWidth 300
+  }
+  title {
+    FontSize 22
+    LineThickness 0
+  }
+</style>
+
+skinparam ArrowLollipopColor black
+skinparam BackgroundColor white
+skinparam DefaultFontName Verdana
+skinparam DefaultMonospacedFontName Courier
+skinparam LifelineStrategy nosolid
+skinparam ParticipantPadding 10
+skinparam SequenceLifeLineBorderColor black
+skinparam Shadowing false
+skinparam UseBetaStyle true
+
+skinparam Activity {
+  BackgroundColor white
+  BarColor black
+  BorderColor black
+  FontColor black
+  FontName Verdana
+}
+skinparam Boundary {
+  FontColor black
+}
+skinparam Box {
+  Padding 5
+}
+skinparam CircledCharacter {
+  FontColor black
+  FontName Courier
+  Radius 9
+}
+skinparam Class {
+  BackgroundColor white
+  BorderColor black
+  FontColor black
+  FontName Verdana
+}
+skinparam ClassAttribute {
+  FontColor black
+  FontName Verdana
+}
+skinparam ClassStereotype {
+  FontColor black
+  FontName Verdana
+}
+skinparam Footer {
+  FontColor black
+  FontName Verdana
+}
+skinparam Header {
+  FontColor black
+  FontName Verdana
+}
+skinparam Hyperlink {
+  Color blue
+}
+skinparam IconPackage {
+  Color black
+  BackgroundColor white
+}
+skinparam IconPrivate {
+  Color black
+  BackgroundColor white
+}
+skinparam IconProtected {
+  Color black
+  BackgroundColor white
+}
+skinparam IconPublic {
+  Color black
+  BackgroundColor white
+}
+skinparam Note {
+  FontColor black
+  FontName Verdana
+}
+skinparam Object {
+  BorderColor black
+}
+skinparam Package {
+  BorderColor black
+  FontColor black
+  FontName Verdana
+}
+skinparam State {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam StereotypeA {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam StereotypeC {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam StereotypeE {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam StereotypeI {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam StereotypeN {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam UseCaseStereoType {
+  FontColor black
+  FontName Verdana
+}
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName Arial
+skinparam defaultFontSize 11
+
+skinparam participant {
+    BackgroundColor #E3F2FD
+    BorderColor #1976D2
+    FontColor #0D47A1
+}
+
+skinparam note {
+    BackgroundColor #FFF9C4
+    BorderColor #F9A825
+}
+
+title Flujo de Failover - PRIMARY-BACKUP
+
+participant "server_1\n(PRIMARY)" as s1 #C8E6C9
+participant "server_2\n(BACKUP)" as s2 #FFECB3
+participant "server_3\n(BACKUP)" as s3 #FFECB3
+participant "dns_1\n(Coordinator)" as dns #E3F2FD
+
+== Estado Normal ==
+
+s1 -> dns : heartbeat 5s
+s2 -> dns : heartbeat 5s
+s3 -> dns : heartbeat 5s
+
+note right of dns
+  Todos los servidores
+  reportan estado OK
+end note
+
+== Fallo Detectado (15s sin heartbeat) ==
+
+s1 -[#FF0000]x dns : <color:#FF0000>X no responde</color>
+
+note right of dns #FFCDD2
+  seconds_since_heartbeat > 15
+  server_1 marcado como DOWN
+end note
+
+== Promoción Automática ==
+
+dns -> dns : promote_backup_to_primary()
+note right of dns #C8E6C9
+  server_2.role = "PRIMARY"
+end note
+
+== Notificación via Heartbeat ==
+
+s2 -> dns : heartbeat
+dns - -> s2 : {role: "PRIMARY"}
+
+note over s2 #C8E6C9
+  _handle_role_change("PRIMARY")
+  stop SyncService
+end note
+
+s2 -[#C8E6C9]-> s2 : Ahora es PRIMARY
+
+== Reincorporación ==
+
+s1 -[#1976D2]-> dns : POST /server/register\n(reiniciado)
+
+note right of dns
+  Ya hay PRIMARY
+  Asignar BACKUP
+end note
+
+dns - -> s1 : {role: "BACKUP"}
+
+note over s1 #FFECB3
+  start SyncService
+  sync desde server_2
+end note
+
+s1 -[#4CAF50,dashed]-> s2 : sync 10s
+
+legend right
+  |= Estado |= Significado |
+  |<#C8E6C9> | PRIMARY |
+  |<#FFECB3> | BACKUP |
+  |<#FFCDD2> | Fallo detectado |
+end legend
+@enduml
+
+PlantUML version 1.2022.7(Mon Aug 22 17:01:30 UTC 2022)
+(GPL source distribution)
+Java Runtime: OpenJDK Runtime Environment
+JVM: OpenJDK 64-Bit Server VM
+Default Encoding: UTF-8
+Language: en
+Country: null
+--></g></svg>

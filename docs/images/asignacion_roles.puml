@@ -1,0 +1,60 @@
+@startuml asignacion_roles
+!theme plain
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+
+skinparam participant {
+    BackgroundColor #E3F2FD
+    BorderColor #1976D2
+    FontColor #0D47A1
+}
+
+skinparam note {
+    BackgroundColor #FFF9C4
+    BorderColor #F9A825
+}
+
+skinparam sequence {
+    ArrowColor #1976D2
+    LifeLineBorderColor #1976D2
+}
+
+title Flujo de Asignación de Roles (PRIMARY-BACKUP)
+
+participant "Server N\n(startup)" as Server #E8F5E9
+participant "DNS Service" as DNS #E3F2FD
+participant "Evaluación\n¿Hay otro PRIMARY?" as Eval #FFF3E0
+
+== Registro del Servidor ==
+
+Server -> DNS : **1. POST /server/register**\n{server_id, ip, port}
+activate DNS
+
+DNS -> Eval : Verificar servidores activos
+activate Eval
+
+Eval --> DNS : Resultado evaluación
+deactivate Eval
+
+DNS --> Server : **2. Response**\n{role: PRIMARY | BACKUP}
+deactivate DNS
+
+== Comportamiento según Rol ==
+
+alt role == PRIMARY
+    note over Server #C8E6C9
+        **Si role == PRIMARY:**
+        • Atender todas las peticiones
+        • Servir datos a los BACKUPs
+    end note
+else role == BACKUP
+    note over Server #FFECB3
+        **Si role == BACKUP:**
+        • Iniciar SyncService
+        • Sincronizar DB y archivos
+          cada 10 segundos
+    end note
+end
+
+@enduml

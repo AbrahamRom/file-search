@@ -1,0 +1,60 @@
+@startuml arquitectura_datos
+!theme plain
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName Arial
+skinparam defaultFontSize 11
+skinparam linetype ortho
+
+skinparam rectangle {
+    BackgroundColor #FFFFFF
+    BorderColor #1976D2
+    RoundCorner 8
+}
+
+skinparam database {
+    BackgroundColor #E3F2FD
+    BorderColor #1976D2
+}
+
+skinparam folder {
+    BackgroundColor #E3F2FD
+    BorderColor #1976D2
+}
+
+title Arquitectura de Datos - Replicación PRIMARY-BACKUP
+
+rectangle "Server 1 (PRIMARY)" as s1 #E8F5E9 {
+    database "SQLite DB\n12 KB" as db1 #C8E6C9
+    folder "/app/files\n(interno)" as files1 #C8E6C9
+}
+
+rectangle "Server 2 (BACKUP)" as s2 #FFF3E0 {
+    database "SQLite DB\n12 KB" as db2 #FFECB3
+    folder "/app/files\n(interno)" as files2 #FFECB3
+}
+
+rectangle "Server 3 (BACKUP)" as s3 #FFF3E0 {
+    database "SQLite DB\n12 KB" as db3 #FFECB3
+    folder "/app/files\n(interno)" as files3 #FFECB3
+}
+
+' Layout horizontal de BACKUPs
+s2 -[hidden]right- s3
+
+' Sincronización PRIMARY -> BACKUPs
+s1 -[#4CAF50,bold,dashed]down-> s2 : sync 10s
+s1 -[#4CAF50,bold,dashed]down-> s3 : sync 10s
+
+legend right
+  |= Color |= Significado |
+  |<#C8E6C9> | PRIMARY (escritura/lectura) |
+  |<#FFECB3> | BACKUP (solo lectura) |
+  |<#4CAF50> | Sincronización |
+end legend
+
+note bottom of s2 #FFF9C4
+  Datos internos al contenedor
+  (sin volúmenes persistentes)
+end note
+
+@enduml

@@ -1,0 +1,272 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" contentStyleType="text/css" height="568px" preserveAspectRatio="none" style="width:645px;height:568px;background:#FAFAFA;" version="1.1" viewBox="0 0 645 568" width="645px" zoomAndPan="magnify"><defs/><g><rect fill="#FAFAFA" height="35.6094" id="_title" style="stroke:#FAFAFA;stroke-width:0.0;" width="622" x="10" y="10"/><text fill="#000000" font-family="Arial" font-size="22" font-weight="bold" lengthAdjust="spacing" textLength="612" x="15" y="35.4209">Flujo de Asignación de Roles (PRIMARY-BACKUP)</text><rect fill="#FFFFFF" height="97.875" style="stroke:#1976D2;stroke-width:1.0;" width="10" x="335.75" y="180.4531"/><rect fill="#FFFFFF" height="27.9688" style="stroke:#1976D2;stroke-width:1.0;" width="10" x="532.75" y="208.4219"/><rect fill="#FFFFFF" height="169.7188" style="stroke:#000000;stroke-width:1.0;" width="233" x="31.75" y="335.2969"/><rect fill="#FFFFFF" height="91.8438" style="stroke:none;stroke-width:1.0;" width="233" x="31.75" y="413.1719"/><line style="stroke:#1976D2;stroke-width:1.0;stroke-dasharray:5.0,5.0;" x1="148.75" x2="148.75" y1="94.5469" y2="522.0156"/><line style="stroke:#1976D2;stroke-width:1.0;stroke-dasharray:5.0,5.0;" x1="340.25" x2="340.25" y1="94.5469" y2="522.0156"/><line style="stroke:#1976D2;stroke-width:1.0;stroke-dasharray:5.0,5.0;" x1="537.25" x2="537.25" y1="94.5469" y2="522.0156"/><rect fill="#E8F5E9" height="41.9375" rx="2.5" ry="2.5" style="stroke:#1976D2;stroke-width:1.0;" width="70" x="113.75" y="51.6094"/><text fill="#0D47A1" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="53" x="122.25" y="69.748">Server N</text><text fill="#0D47A1" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="56" x="120.75" y="83.7168">(startup)</text><rect fill="#E8F5E9" height="41.9375" rx="2.5" ry="2.5" style="stroke:#1976D2;stroke-width:1.0;" width="70" x="113.75" y="521.0156"/><text fill="#0D47A1" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="53" x="122.25" y="539.1543">Server N</text><text fill="#0D47A1" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="56" x="120.75" y="553.123">(startup)</text><rect fill="#E3F2FD" height="27.9688" rx="2.5" ry="2.5" style="stroke:#1976D2;stroke-width:1.0;" width="89" x="296.25" y="65.5781"/><text fill="#0D47A1" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="75" x="303.25" y="83.7168">DNS Service</text><rect fill="#E3F2FD" height="27.9688" rx="2.5" ry="2.5" style="stroke:#1976D2;stroke-width:1.0;" width="89" x="296.25" y="521.0156"/><text fill="#0D47A1" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="75" x="303.25" y="539.1543">DNS Service</text><rect fill="#FFF3E0" height="41.9375" rx="2.5" ry="2.5" style="stroke:#1976D2;stroke-width:1.0;" width="135" x="470.25" y="51.6094"/><text fill="#0D47A1" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="67" x="504.25" y="69.748">Evaluación</text><text fill="#0D47A1" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="121" x="477.25" y="83.7168">¿Hay otro PRIMARY?</text><rect fill="#FFF3E0" height="41.9375" rx="2.5" ry="2.5" style="stroke:#1976D2;stroke-width:1.0;" width="135" x="470.25" y="521.0156"/><text fill="#0D47A1" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="67" x="504.25" y="539.1543">Evaluación</text><text fill="#0D47A1" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="121" x="477.25" y="553.123">¿Hay otro PRIMARY?</text><rect fill="#FFFFFF" height="97.875" style="stroke:#1976D2;stroke-width:1.0;" width="10" x="335.75" y="180.4531"/><rect fill="#FFFFFF" height="27.9688" style="stroke:#1976D2;stroke-width:1.0;" width="10" x="532.75" y="208.4219"/><rect fill="#FFFFFF" height="3" style="stroke:#FFFFFF;stroke-width:1.0;" width="597.5" x="22.75" y="124.5313"/><line style="stroke:#000000;stroke-width:0.5;" x1="22.75" x2="620.25" y1="124.5313" y2="124.5313"/><line style="stroke:#000000;stroke-width:0.5;" x1="22.75" x2="620.25" y1="127.5313" y2="127.5313"/><rect fill="#FFFFFF" height="21.9688" style="stroke:#000000;stroke-width:1.0;" width="167" x="238" y="114.5469"/><text fill="#000000" font-family="Arial" font-size="12" font-weight="bold" lengthAdjust="spacing" textLength="149" x="244" y="129.6855">Registro del Servidor</text><polygon fill="#1976D2" points="323.75,176.4531,333.75,180.4531,323.75,184.4531,327.75,180.4531" style="stroke:#1976D2;stroke-width:1.0;"/><line style="stroke:#1976D2;stroke-width:1.0;" x1="148.75" x2="329.75" y1="180.4531" y2="180.4531"/><text fill="#000000" font-family="Arial" font-size="12" font-weight="bold" lengthAdjust="spacing" textLength="168" x="155.75" y="161.6543">1. POST /server/register</text><text fill="#000000" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="125" x="155.75" y="175.623">{server_id, ip, port}</text><polygon fill="#1976D2" points="520.75,204.4219,530.75,208.4219,520.75,212.4219,524.75,208.4219" style="stroke:#1976D2;stroke-width:1.0;"/><line style="stroke:#1976D2;stroke-width:1.0;" x1="345.75" x2="526.75" y1="208.4219" y2="208.4219"/><text fill="#000000" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="168" x="352.75" y="203.5918">Verificar servidores activos</text><polygon fill="#1976D2" points="356.75,232.3906,346.75,236.3906,356.75,240.3906,352.75,236.3906" style="stroke:#1976D2;stroke-width:1.0;"/><line style="stroke:#1976D2;stroke-width:1.0;stroke-dasharray:2.0,2.0;" x1="350.75" x2="536.75" y1="236.3906" y2="236.3906"/><text fill="#000000" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="134" x="362.75" y="231.5605">Resultado evaluación</text><polygon fill="#1976D2" points="159.75,274.3281,149.75,278.3281,159.75,282.3281,155.75,278.3281" style="stroke:#1976D2;stroke-width:1.0;"/><line style="stroke:#1976D2;stroke-width:1.0;stroke-dasharray:2.0,2.0;" x1="153.75" x2="339.75" y1="278.3281" y2="278.3281"/><text fill="#000000" font-family="Arial" font-size="12" font-weight="bold" lengthAdjust="spacing" textLength="87" x="165.75" y="259.5293">2. Response</text><text fill="#000000" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="160" x="165.75" y="273.498">{role: PRIMARY | BACKUP}</text><rect fill="#FFFFFF" height="3" style="stroke:#FFFFFF;stroke-width:1.0;" width="597.5" x="22.75" y="306.3125"/><line style="stroke:#000000;stroke-width:0.5;" x1="22.75" x2="620.25" y1="306.3125" y2="306.3125"/><line style="stroke:#000000;stroke-width:0.5;" x1="22.75" x2="620.25" y1="309.3125" y2="309.3125"/><rect fill="#FFFFFF" height="21.9688" style="stroke:#000000;stroke-width:1.0;" width="210" x="216.5" y="296.3281"/><text fill="#000000" font-family="Arial" font-size="12" font-weight="bold" lengthAdjust="spacing" textLength="192" x="222.5" y="311.4668">Comportamiento según Rol</text><path d="M31.75,335.2969 L95.75,335.2969 L95.75,341.2656 L85.75,351.2656 L31.75,351.2656 L31.75,335.2969 " fill="#FFFFFF" style="stroke:#000000;stroke-width:1.0;"/><rect fill="none" height="169.7188" style="stroke:#000000;stroke-width:1.0;" width="233" x="31.75" y="335.2969"/><text fill="#000000" font-family="Arial" font-size="12" font-weight="bold" lengthAdjust="spacing" textLength="19" x="46.75" y="347.4355">alt</text><text fill="#000000" font-family="Arial" font-size="12" font-weight="bold" lengthAdjust="spacing" textLength="126" x="110.75" y="348.4355">[role == PRIMARY]</text><path d="M41.75,356.2656 L41.75,407.2656 L254.75,407.2656 L254.75,366.2656 L244.75,356.2656 L41.75,356.2656 " fill="#C8E6C9" style="stroke:#000000;stroke-width:1.0;"/><path d="M244.75,356.2656 L244.75,366.2656 L254.75,366.2656 L244.75,356.2656 " fill="#C8E6C9" style="stroke:#000000;stroke-width:1.0;"/><text fill="#000000" font-family="Arial" font-size="12" font-weight="bold" lengthAdjust="spacing" textLength="138" x="47.75" y="372.4043">Si role == PRIMARY:</text><text fill="#000000" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="192" x="47.75" y="386.373">• Atender todas las peticiones</text><text fill="#000000" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="179" x="47.75" y="400.3418">• Servir datos a los BACKUPs</text><line style="stroke:#000000;stroke-width:1.0;stroke-dasharray:2.0,2.0;" x1="31.75" x2="264.75" y1="414.1719" y2="414.1719"/><text fill="#000000" font-family="Arial" font-size="12" font-weight="bold" lengthAdjust="spacing" textLength="121" x="36.75" y="425.3105">[role == BACKUP]</text><path d="M54.75,434.1406 L54.75,499.1406 L241.75,499.1406 L241.75,444.1406 L231.75,434.1406 L54.75,434.1406 " fill="#FFECB3" style="stroke:#000000;stroke-width:1.0;"/><path d="M231.75,434.1406 L231.75,444.1406 L241.75,444.1406 L231.75,434.1406 " fill="#FFECB3" style="stroke:#000000;stroke-width:1.0;"/><text fill="#000000" font-family="Arial" font-size="12" font-weight="bold" lengthAdjust="spacing" textLength="133" x="60.75" y="450.2793">Si role == BACKUP:</text><text fill="#000000" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="126" x="60.75" y="464.248">• Iniciar SyncService</text><text fill="#000000" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="166" x="60.75" y="478.2168">• Sincronizar DB y archivos</text><text fill="#000000" font-family="Arial" font-size="12" lengthAdjust="spacing" textLength="117" x="68.75" y="492.1855">cada 10 segundos</text><!--MD5=[b7309162177224c816ee9a9b910affd9]
+@startuml
+!theme plain
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+
+skinparam participant {
+    BackgroundColor #E3F2FD
+    BorderColor #1976D2
+    FontColor #0D47A1
+}
+
+skinparam note {
+    BackgroundColor #FFF9C4
+    BorderColor #F9A825
+}
+
+skinparam sequence {
+    ArrowColor #1976D2
+    LifeLineBorderColor #1976D2
+}
+
+title Flujo de Asignación de Roles (PRIMARY-BACKUP)
+
+participant "Server N\n(startup)" as Server #E8F5E9
+participant "DNS Service" as DNS #E3F2FD
+participant "Evaluación\n¿Hay otro PRIMARY?" as Eval #FFF3E0
+
+== Registro del Servidor ==
+
+Server -> DNS : **1. POST /server/register**\n{server_id, ip, port}
+activate DNS
+
+DNS -> Eval : Verificar servidores activos
+activate Eval
+
+Eval - -> DNS : Resultado evaluación
+deactivate Eval
+
+DNS - -> Server : **2. Response**\n{role: PRIMARY | BACKUP}
+deactivate DNS
+
+== Comportamiento según Rol ==
+
+alt role == PRIMARY
+    note over Server #C8E6C9
+        **Si role == PRIMARY:**
+        • Atender todas las peticiones
+        • Servir datos a los BACKUPs
+    end note
+else role == BACKUP
+    note over Server #FFECB3
+        **Si role == BACKUP:**
+        • Iniciar SyncService
+        • Sincronizar DB y archivos
+          cada 10 segundos
+    end note
+end
+@enduml
+
+@startuml
+
+
+
+
+
+
+
+<style>
+  root {
+    BackgroundColor white
+    FontColor black
+    FontName Verdana
+    HyperLinkColor blue
+    LineColor black
+    LineThickness 1
+    Margin 5
+  }
+  caption {
+    LineThickness 0
+  }
+  footer {
+    LineThickness 0
+  }
+  header {
+    LineThickness 0
+  }
+  node {
+    MaximumWidth 300
+  }
+  title {
+    FontSize 22
+    LineThickness 0
+  }
+</style>
+
+skinparam ArrowLollipopColor black
+skinparam BackgroundColor white
+skinparam DefaultFontName Verdana
+skinparam DefaultMonospacedFontName Courier
+skinparam LifelineStrategy nosolid
+skinparam ParticipantPadding 10
+skinparam SequenceLifeLineBorderColor black
+skinparam Shadowing false
+skinparam UseBetaStyle true
+
+skinparam Activity {
+  BackgroundColor white
+  BarColor black
+  BorderColor black
+  FontColor black
+  FontName Verdana
+}
+skinparam Boundary {
+  FontColor black
+}
+skinparam Box {
+  Padding 5
+}
+skinparam CircledCharacter {
+  FontColor black
+  FontName Courier
+  Radius 9
+}
+skinparam Class {
+  BackgroundColor white
+  BorderColor black
+  FontColor black
+  FontName Verdana
+}
+skinparam ClassAttribute {
+  FontColor black
+  FontName Verdana
+}
+skinparam ClassStereotype {
+  FontColor black
+  FontName Verdana
+}
+skinparam Footer {
+  FontColor black
+  FontName Verdana
+}
+skinparam Header {
+  FontColor black
+  FontName Verdana
+}
+skinparam Hyperlink {
+  Color blue
+}
+skinparam IconPackage {
+  Color black
+  BackgroundColor white
+}
+skinparam IconPrivate {
+  Color black
+  BackgroundColor white
+}
+skinparam IconProtected {
+  Color black
+  BackgroundColor white
+}
+skinparam IconPublic {
+  Color black
+  BackgroundColor white
+}
+skinparam Note {
+  FontColor black
+  FontName Verdana
+}
+skinparam Object {
+  BorderColor black
+}
+skinparam Package {
+  BorderColor black
+  FontColor black
+  FontName Verdana
+}
+skinparam State {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam StereotypeA {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam StereotypeC {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam StereotypeE {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam StereotypeI {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam StereotypeN {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam UseCaseStereoType {
+  FontColor black
+  FontName Verdana
+}
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+
+skinparam participant {
+    BackgroundColor #E3F2FD
+    BorderColor #1976D2
+    FontColor #0D47A1
+}
+
+skinparam note {
+    BackgroundColor #FFF9C4
+    BorderColor #F9A825
+}
+
+skinparam sequence {
+    ArrowColor #1976D2
+    LifeLineBorderColor #1976D2
+}
+
+title Flujo de Asignación de Roles (PRIMARY-BACKUP)
+
+participant "Server N\n(startup)" as Server #E8F5E9
+participant "DNS Service" as DNS #E3F2FD
+participant "Evaluación\n¿Hay otro PRIMARY?" as Eval #FFF3E0
+
+== Registro del Servidor ==
+
+Server -> DNS : **1. POST /server/register**\n{server_id, ip, port}
+activate DNS
+
+DNS -> Eval : Verificar servidores activos
+activate Eval
+
+Eval - -> DNS : Resultado evaluación
+deactivate Eval
+
+DNS - -> Server : **2. Response**\n{role: PRIMARY | BACKUP}
+deactivate DNS
+
+== Comportamiento según Rol ==
+
+alt role == PRIMARY
+    note over Server #C8E6C9
+        **Si role == PRIMARY:**
+        • Atender todas las peticiones
+        • Servir datos a los BACKUPs
+    end note
+else role == BACKUP
+    note over Server #FFECB3
+        **Si role == BACKUP:**
+        • Iniciar SyncService
+        • Sincronizar DB y archivos
+          cada 10 segundos
+    end note
+end
+@enduml
+
+PlantUML version 1.2022.7(Mon Aug 22 17:01:30 UTC 2022)
+(GPL source distribution)
+Java Runtime: OpenJDK Runtime Environment
+JVM: OpenJDK 64-Bit Server VM
+Default Encoding: UTF-8
+Language: en
+Country: null
+--></g></svg>

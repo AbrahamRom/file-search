@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" contentStyleType="text/css" height="1165.625px" preserveAspectRatio="none" style="width:1203px;height:1165px;background:#FFFFFF;" version="1.1" viewBox="0 0 1203 1165" width="1203.125px" zoomAndPan="magnify"><defs><filter height="1" id="bshc5yh5pey7o0" width="1" x="0" y="0"><feFlood flood-color="#90EE90" result="flood"/><feComposite in="SourceGraphic" in2="flood" operator="over"/></filter><filter height="1" id="bshc5yh5pey7o1" width="1" x="0" y="0"><feFlood flood-color="#FFE4B5" result="flood"/><feComposite in="SourceGraphic" in2="flood" operator="over"/></filter></defs><g><rect fill="#FFFFFF" height="66.5527" id="_title" style="stroke:none;stroke-width:1.5625;" width="681.25" x="250" y="7.8125"/><text fill="#000000" font-family="Helvetica" font-size="21.875" font-weight="bold" lengthAdjust="spacing" textLength="665.625" x="257.8125" y="35.9299">Comunicación Cliente-Servidor con Alta Disponibilidad</text><text fill="#000000" font-family="Helvetica" font-size="21.875" font-weight="bold" lengthAdjust="spacing" textLength="457.8125" x="361.7188" y="61.3937">Modelo PRIMARY-BACKUP en 3 Capas</text><!--MD5=[b059d3f60b2568fb7f1f60eefda43504]
+cluster capa_cliente--><g id="cluster_capa_cliente"><rect fill="#E3F2FD" height="220.3125" rx="7.8125" ry="7.8125" style="stroke:#181818;stroke-width:1.5625;" width="815.625" x="10.9375" y="94.6777"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" font-weight="bold" lengthAdjust="spacing" textLength="189.0625" x="324.2188" y="113.7566">CAPA CLIENTE (HA)</text></g><!--MD5=[a2643d7cef1678273236c635590c5257]
+cluster capa_dns--><g id="cluster_capa_dns"><rect fill="#F3E5F5" height="220.3125" rx="7.8125" ry="7.8125" style="stroke:#181818;stroke-width:1.5625;" width="817.1875" x="268.75" y="386.8652"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" font-weight="bold" lengthAdjust="spacing" textLength="146.875" x="603.9063" y="405.9441">CAPA DNS (HA)</text></g><!--MD5=[d907a1e8923c16e7183f586b869322f5]
+cluster capa_server--><g id="cluster_capa_server"><rect fill="#FFF3E0" height="239.0625" rx="7.8125" ry="7.8125" style="stroke:#181818;stroke-width:1.5625;" width="937.5" x="256.25" y="679.0527"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" font-weight="bold" lengthAdjust="spacing" textLength="267.1875" x="591.4063" y="698.1316">CAPA SERVIDORES API (HA)</text></g><!--MD5=[93332a8572591d97ac3d7d93f487262b]
+entity client1--><g id="elem_client1"><rect fill="#90EE90" height="71.2646" rx="7.8125" ry="7.8125" style="stroke:#181818;stroke-width:0.78125;" width="206.25" x="73.4375" y="180.6152"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="67.1875" x="89.0625" y="212.1941">client_1</text><text fill="#000000" font-family="Helvetica" font-size="17.1875" font-weight="bold" lengthAdjust="spacing" textLength="101.5625" x="162.5" y="212.1941">(PRIMARY)</text><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="62.5" x="89.0625" y="232.2014">Nodo 1</text></g><!--MD5=[8114dbb7027f683df91a35cf885956a2]
+entity client2--><g id="elem_client2"><rect fill="#FFE4B5" height="71.2646" rx="7.8125" ry="7.8125" style="stroke:#181818;stroke-width:0.78125;" width="187.5" x="334.375" y="180.6152"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="156.25" x="350" y="212.1941">client_2 (BACKUP)</text><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="62.5" x="350" y="232.2014">Nodo 2</text></g><!--MD5=[2070200cdb767c5b844c435ba56ba8ba]
+entity client3--><g id="elem_client3"><rect fill="#FFE4B5" height="71.2646" rx="7.8125" ry="7.8125" style="stroke:#181818;stroke-width:0.78125;" width="187.5" x="576.5625" y="180.6152"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="156.25" x="592.1875" y="212.1941">client_3 (BACKUP)</text><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="62.5" x="592.1875" y="232.2014">Nodo 1</text></g><!--MD5=[6422eafcdd615d390a894519a07d2da0]
+entity dns1--><g id="elem_dns1"><rect fill="#90EE90" height="71.2646" rx="7.8125" ry="7.8125" style="stroke:#181818;stroke-width:0.78125;" width="192.1875" x="332.0313" y="472.8027"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="53.125" x="347.6563" y="504.3816">dns_1</text><text fill="#000000" font-family="Helvetica" font-size="17.1875" font-weight="bold" lengthAdjust="spacing" textLength="101.5625" x="407.0313" y="504.3816">(PRIMARY)</text><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="62.5" x="347.6563" y="524.3889">Nodo 1</text></g><!--MD5=[62a02d48d028bdd31b8f3ab641ea9a8e]
+entity dns2--><g id="elem_dns2"><rect fill="#FFE4B5" height="71.2646" rx="7.8125" ry="7.8125" style="stroke:#181818;stroke-width:0.78125;" width="173.4375" x="622.6563" y="472.8027"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="142.1875" x="638.2813" y="504.3816">dns_2 (BACKUP)</text><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="62.5" x="638.2813" y="524.3889">Nodo 2</text></g><!--MD5=[6392489accbedb805e4fb1dced59b1b2]
+entity dns3--><g id="elem_dns3"><rect fill="#FFE4B5" height="71.2646" rx="7.8125" ry="7.8125" style="stroke:#181818;stroke-width:0.78125;" width="173.4375" x="850.7813" y="472.8027"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="142.1875" x="866.4063" y="504.3816">dns_3 (BACKUP)</text><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="62.5" x="866.4063" y="524.3889">Nodo 1</text></g><!--MD5=[66e0e2e999ee0dd4a03dafa42a76d5ef]
+entity server1--><g id="elem_server1"><rect fill="#90EE90" height="91.272" rx="7.8125" ry="7.8125" style="stroke:#181818;stroke-width:0.78125;" width="217.1875" x="319.5313" y="764.9902"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="78.125" x="335.1563" y="796.5691">server_1</text><text fill="#000000" font-family="Helvetica" font-size="17.1875" font-weight="bold" lengthAdjust="spacing" textLength="101.5625" x="419.5313" y="796.5691">(PRIMARY)</text><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="178.125" x="335.1563" y="816.5764">API + SQLite + Files</text><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="62.5" x="335.1563" y="836.5837">Nodo 1</text></g><!--MD5=[36a0fb3b920d2731ec683a5a5f5daac8]
+entity server2--><g id="elem_server2"><rect fill="#FFE4B5" height="91.272" rx="7.8125" ry="7.8125" style="stroke:#181818;stroke-width:0.78125;" width="198.4375" x="635.1563" y="764.9902"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="167.1875" x="650.7813" y="796.5691">server_2 (BACKUP)</text><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="128.125" x="650.7813" y="816.5764">sync cada 10s</text><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="62.5" x="650.7813" y="836.5837">Nodo 2</text></g><!--MD5=[03e800437cff674885281e885373ee45]
+entity server3--><g id="elem_server3"><rect fill="#FFE4B5" height="91.272" rx="7.8125" ry="7.8125" style="stroke:#181818;stroke-width:0.78125;" width="198.4375" x="932.0313" y="764.9902"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="167.1875" x="947.6563" y="796.5691">server_3 (BACKUP)</text><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="128.125" x="947.6563" y="816.5764">sync cada 10s</text><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="62.5" x="947.6563" y="836.5837">Nodo 1</text></g><!--MD5=[b351fbc19ba4e1dfc6e2e50efd021634]
+link client1 to client2--><!--MD5=[99d68865f9b08145d88ebf568508f7ba]
+link client2 to client3--><!--MD5=[db5f9902863d14ad57bb915d6ad5c8cc]
+link dns1 to dns2--><!--MD5=[1e96e1e10d1b187802723e0d9ee3db40]
+reverse link dns1 to dns2--><g id="link_dns1_dns2"><path d="M532.7969,508.7402 C562.3438,508.7402 594.1563,508.7402 622.5313,508.7402 " fill="none" id="dns1-backto-dns2" style="stroke:#9C27B0;stroke-width:1.5625;stroke-dasharray:7.0,7.0;"/><polygon fill="#9C27B0" points="524.5156,508.7402,538.5781,514.9902,532.3281,508.7402,538.5781,502.4902,524.5156,508.7402" style="stroke:#9C27B0;stroke-width:1.5625;"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="40.625" x="553.125" y="499.6941">sync</text></g><!--MD5=[e68f01b8a268534c7f6e764acb4379ac]
+link dns2 to dns3--><!--MD5=[744f7f0dbbf71e742411f50fec62304d]
+reverse link dns2 to dns3--><g id="link_dns2_dns3"><path d="M804.2813,482.5527 C819.625,481.334 834.9844,481.5684 850.3281,483.2871 " fill="none" id="dns2-backto-dns3" style="stroke:#9C27B0;stroke-width:1.5625;stroke-dasharray:7.0,7.0;"/><polygon fill="#9C27B0" points="796.2656,483.3184,810.8553,488.2129,804.0432,482.5808,809.6753,475.7687,796.2656,483.3184" style="stroke:#9C27B0;stroke-width:1.5625;"/></g><!--MD5=[9146f7b4de25443b4dd8ec84eceb47fb]
+link server1 to server2--><!--MD5=[9146f7b4de25443b4dd8ec84eceb47fb]
+link server1 to server2--><g id="link_server1_server2"><path d="M536.9531,810.3027 C566.1875,810.3027 597.7813,810.3027 626.9219,810.3027 " fill="none" id="server1-to-server2" style="stroke:#43A047;stroke-width:3.125;"/><polygon fill="#43A047" points="635.0781,810.3027,621.0156,804.0527,627.2656,810.3027,621.0156,816.5527,635.0781,810.3027" style="stroke:#43A047;stroke-width:3.125;"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="40.625" x="565.625" y="801.2566">sync</text></g><!--MD5=[40059543903b02b4750d8799b5dd92c9]
+link server2 to server3--><!--MD5=[40059543903b02b4750d8799b5dd92c9]
+link server2 to server3--><g id="link_server2_server3"><path d="M833.6406,810.3027 C862.4531,810.3027 894.0469,810.3027 923.3594,810.3027 " fill="none" id="server2-to-server3" style="stroke:#43A047;stroke-width:3.125;"/><polygon fill="#43A047" points="931.5625,810.3027,917.5,804.0527,923.75,810.3027,917.5,816.5527,931.5625,810.3027" style="stroke:#43A047;stroke-width:3.125;"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="40.625" x="862.5" y="801.2566">sync</text></g><!--MD5=[c3aede9d01c6dbd8e05629bd4bbdca2f]
+link client1 to dns1--><g id="link_client1_dns1"><path d="M184.7656,252.7402 C193.3438,283.6621 209.1406,329.0059 234.375,361.8652 C267.9063,405.5215 317.8125,442.5371 358.5781,468.2715 " fill="none" id="client1-to-dns1" style="stroke:#1976D2;stroke-width:3.125;"/><polygon fill="#1976D2" points="365.5625,472.6309,356.9307,459.8908,358.9312,468.5003,350.3218,470.5008,365.5625,472.6309" style="stroke:#1976D2;stroke-width:3.125;"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="178.125" x="235.9375" y="357.5066">GET /server/resolve</text></g><!--MD5=[3f46e972057b3fa598deb88d9ad37eef]
+link client2 to dns1--><g id="link_client2_dns1"><path d="M428.125,252.9902 C428.125,306.084 428.125,407.084 428.125,464.4902 " fill="none" id="client2-to-dns1" style="stroke:#1976D2;stroke-width:1.5625;stroke-dasharray:7.0,7.0;"/><polygon fill="#1976D2" points="428.125,472.6309,434.375,458.5684,428.125,464.8184,421.875,458.5684,428.125,472.6309" style="stroke:#1976D2;stroke-width:1.5625;"/></g><!--MD5=[a984cb50ba57ff90f7f0739bec4c3c34]
+link client3 to dns1--><g id="link_client3_dns1"><path d="M641.0938,252.9902 C596.0625,306.7402 509.9062,409.5684 462.125,466.584 " fill="none" id="client3-to-dns1" style="stroke:#1976D2;stroke-width:1.5625;stroke-dasharray:7.0,7.0;"/><polygon fill="#1976D2" points="457.0625,472.6309,470.8764,465.8491,462.0727,466.6365,461.2854,457.8328,457.0625,472.6309" style="stroke:#1976D2;stroke-width:1.5625;"/></g><!--MD5=[b3c6a9666c630361da09592953e2c923]
+link dns1 to server1--><g id="link_dns1_server1"><path d="M428.125,545.1152 C428.125,597.3652 428.125,696.3496 428.125,757.0371 " fill="none" id="dns1-to-server1" style="stroke:#E65100;stroke-width:3.125;"/><polygon fill="#E65100" points="428.125,764.9746,434.375,750.9121,428.125,757.1621,421.875,750.9121,428.125,764.9746" style="stroke:#E65100;stroke-width:3.125;"/><text fill="#000000" font-family="Helvetica" font-size="17.1875" lengthAdjust="spacing" textLength="187.5" x="429.6875" y="649.6941">{server_id, url, role}</text></g><rect fill="#FFFFFF" height="203.2471" id="_legend" rx="11.7188" ry="11.7188" style="stroke:#000000;stroke-width:1.5625;" width="415.625" x="753.125" y="938.4277"/><text fill="#000000" font-family="Helvetica" font-size="21.875" font-weight="bold" lengthAdjust="spacing" textLength="65.625" x="770.3125" y="971.2326">Color</text><text fill="#000000" font-family="Helvetica" font-size="21.875" font-weight="bold" lengthAdjust="spacing" textLength="134.375" x="851.5625" y="971.2326">Significado</text><text fill="#000000" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="6.25" x="762.5" y="996.6965"> </text><text fill="#000000" filter="url(#bshc5yh5pey7o0)" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="31.25" x="768.75" y="996.6965">     </text><text fill="#000000" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="6.25" x="800" y="996.6965"> </text><text fill="#000000" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="245.3125" x="850" y="996.6965">PRIMARY (Nodo activo)</text><text fill="#000000" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="6.25" x="762.5" y="1022.1603"> </text><text fill="#000000" filter="url(#bshc5yh5pey7o1)" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="31.25" x="768.75" y="1022.1603">     </text><text fill="#000000" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="6.25" x="800" y="1022.1603"> </text><text fill="#000000" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="303.125" x="850" y="1022.1603">BACKUP (Nodo de respaldo)</text><text fill="#000000" font-family="Helvetica" font-size="21.875" font-weight="bold" lengthAdjust="spacing" textLength="65.625" x="770.3125" y="1047.6242">Línea</text><text fill="#000000" font-family="Helvetica" font-size="21.875" font-weight="bold" lengthAdjust="spacing" textLength="53.125" x="851.5625" y="1047.6242">Tipo</text><text fill="#000000" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="6.25" x="762.5" y="1073.0881"> </text><text fill="#1976D2" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="50" x="768.75" y="1073.0881">━━━━</text><text fill="#000000" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="6.25" x="818.75" y="1073.0881"> </text><text fill="#000000" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="245.3125" x="850" y="1073.0881">Petición Cliente → DNS</text><text fill="#000000" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="6.25" x="762.5" y="1098.5519"> </text><text fill="#E65100" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="50" x="768.75" y="1098.5519">━━━━</text><text fill="#000000" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="6.25" x="818.75" y="1098.5519"> </text><text fill="#000000" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="270.3125" x="850" y="1098.5519">Respuesta DNS → Server</text><text fill="#000000" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="6.25" x="762.5" y="1124.0158"> </text><text fill="#43A047" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="50" x="768.75" y="1124.0158">━━━━</text><text fill="#000000" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="6.25" x="818.75" y="1124.0158"> </text><text fill="#000000" font-family="Helvetica" font-size="21.875" lengthAdjust="spacing" textLength="156.25" x="850" y="1124.0158">Sincronización</text><line style="stroke:#000000;stroke-width:1.5625;" x1="762.5" x2="1159.375" y1="950.9277" y2="950.9277"/><line style="stroke:#000000;stroke-width:1.5625;" x1="762.5" x2="1159.375" y1="976.3916" y2="976.3916"/><line style="stroke:#000000;stroke-width:1.5625;" x1="762.5" x2="1159.375" y1="1001.8555" y2="1001.8555"/><line style="stroke:#000000;stroke-width:1.5625;" x1="762.5" x2="1159.375" y1="1027.3193" y2="1027.3193"/><line style="stroke:#000000;stroke-width:1.5625;" x1="762.5" x2="1159.375" y1="1052.7832" y2="1052.7832"/><line style="stroke:#000000;stroke-width:1.5625;" x1="762.5" x2="1159.375" y1="1078.2471" y2="1078.2471"/><line style="stroke:#000000;stroke-width:1.5625;" x1="762.5" x2="1159.375" y1="1103.7109" y2="1103.7109"/><line style="stroke:#000000;stroke-width:1.5625;" x1="762.5" x2="1159.375" y1="1129.1748" y2="1129.1748"/><line style="stroke:#000000;stroke-width:1.5625;" x1="762.5" x2="762.5" y1="950.9277" y2="1129.1748"/><line style="stroke:#000000;stroke-width:1.5625;" x1="843.75" x2="843.75" y1="950.9277" y2="1129.1748"/><line style="stroke:#000000;stroke-width:1.5625;" x1="1159.375" x2="1159.375" y1="950.9277" y2="1129.1748"/><!--MD5=[b38aed9960ec59a79f3150862e2f0982]
+@startuml
+!define PRIMARY_COLOR #90EE90
+!define BACKUP_COLOR #FFE4B5
+!define CAPA_CLIENTE #e3f2fd
+!define CAPA_DNS #f3e5f5
+!define CAPA_SERVER #fff3e0
+
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam defaultFontSize 11
+skinparam dpi 150
+
+skinparam rectangle {
+    roundCorner 10
+}
+
+title Comunicación Cliente-Servidor con Alta Disponibilidad\nModelo PRIMARY-BACKUP en 3 Capas
+
+' ========== CAPA CLIENTE (HA) ==========
+rectangle "**CAPA CLIENTE (HA)**" as capa_cliente CAPA_CLIENTE {
+    together {
+        rectangle "client_1 **(PRIMARY)**\nNodo 1" as client1 PRIMARY_COLOR
+        rectangle "client_2 (BACKUP)\nNodo 2" as client2 BACKUP_COLOR
+        rectangle "client_3 (BACKUP)\nNodo 1" as client3 BACKUP_COLOR
+    }
+}
+
+' ========== CAPA DNS (HA) ==========
+rectangle "**CAPA DNS (HA)**" as capa_dns CAPA_DNS {
+    together {
+        rectangle "dns_1 **(PRIMARY)**\nNodo 1" as dns1 PRIMARY_COLOR
+        rectangle "dns_2 (BACKUP)\nNodo 2" as dns2 BACKUP_COLOR
+        rectangle "dns_3 (BACKUP)\nNodo 1" as dns3 BACKUP_COLOR
+    }
+}
+
+' ========== CAPA SERVIDORES API (HA) ==========
+rectangle "**CAPA SERVIDORES API (HA)**" as capa_server CAPA_SERVER {
+    together {
+        rectangle "server_1 **(PRIMARY)**\nAPI + SQLite + Files\nNodo 1" as server1 PRIMARY_COLOR
+        rectangle "server_2 (BACKUP)\nsync cada 10s\nNodo 2" as server2 BACKUP_COLOR
+        rectangle "server_3 (BACKUP)\nsync cada 10s\nNodo 1" as server3 BACKUP_COLOR
+    }
+}
+
+' ========== LAYOUT HORIZONTAL ==========
+client1 -[hidden]right- client2
+client2 -[hidden]right- client3
+
+dns1 -[hidden]right- dns2
+dns2 -[hidden]right- dns3
+
+server1 -[hidden]right- server2
+server2 -[hidden]right- server3
+
+' ========== CONEXIONES ENTRE CAPAS ==========
+' Clientes hacia DNS
+client1 -[#1976D2,bold]down-> dns1 : "GET /server/resolve"
+client2 -[#1976D2,dashed]down-> dns1
+client3 -[#1976D2,dashed]down-> dns1
+
+' Sincronización DNS
+dns2 -[#9C27B0,dashed]left-> dns1 : "sync"
+dns3 -[#9C27B0,dashed]left-> dns2
+
+' DNS hacia Servidores
+dns1 -[#E65100,bold]down-> server1 : "{server_id, url, role}"
+
+' Sincronización Servidores
+server1 -[#43A047,bold]right-> server2 : "sync"
+server2 -[#43A047,bold]right-> server3 : "sync"
+
+' ========== LEYENDA ==========
+legend right
+    |= Color |= Significado |
+    | <back:PRIMARY_COLOR>     </back> | PRIMARY (Nodo activo) |
+    | <back:BACKUP_COLOR>     </back> | BACKUP (Nodo de respaldo) |
+    |= Línea |= Tipo |
+    | <color:#1976D2>━━━━</color> | Petición Cliente → DNS |
+    | <color:#E65100>━━━━</color> | Respuesta DNS → Server |
+    | <color:#43A047>━━━━</color> | Sincronización |
+endlegend
+@enduml
+
+@startuml
+
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam defaultFontSize 11
+skinparam dpi 150
+
+skinparam rectangle {
+    roundCorner 10
+}
+
+title Comunicación Cliente-Servidor con Alta Disponibilidad\nModelo PRIMARY-BACKUP en 3 Capas
+
+rectangle "**CAPA CLIENTE (HA)**" as capa_cliente #e3f2fd {
+    together {
+        rectangle "client_1 **(PRIMARY)**\nNodo 1" as client1 #90EE90
+        rectangle "client_2 (BACKUP)\nNodo 2" as client2 #FFE4B5
+        rectangle "client_3 (BACKUP)\nNodo 1" as client3 #FFE4B5
+    }
+}
+
+rectangle "**CAPA DNS (HA)**" as capa_dns #f3e5f5 {
+    together {
+        rectangle "dns_1 **(PRIMARY)**\nNodo 1" as dns1 #90EE90
+        rectangle "dns_2 (BACKUP)\nNodo 2" as dns2 #FFE4B5
+        rectangle "dns_3 (BACKUP)\nNodo 1" as dns3 #FFE4B5
+    }
+}
+
+rectangle "**CAPA SERVIDORES API (HA)**" as capa_server #fff3e0 {
+    together {
+        rectangle "server_1 **(PRIMARY)**\nAPI + SQLite + Files\nNodo 1" as server1 #90EE90
+        rectangle "server_2 (BACKUP)\nsync cada 10s\nNodo 2" as server2 #FFE4B5
+        rectangle "server_3 (BACKUP)\nsync cada 10s\nNodo 1" as server3 #FFE4B5
+    }
+}
+
+client1 -[hidden]right- client2
+client2 -[hidden]right- client3
+
+dns1 -[hidden]right- dns2
+dns2 -[hidden]right- dns3
+
+server1 -[hidden]right- server2
+server2 -[hidden]right- server3
+
+client1 -[#1976D2,bold]down-> dns1 : "GET /server/resolve"
+client2 -[#1976D2,dashed]down-> dns1
+client3 -[#1976D2,dashed]down-> dns1
+
+dns2 -[#9C27B0,dashed]left-> dns1 : "sync"
+dns3 -[#9C27B0,dashed]left-> dns2
+
+dns1 -[#E65100,bold]down-> server1 : "{server_id, url, role}"
+
+server1 -[#43A047,bold]right-> server2 : "sync"
+server2 -[#43A047,bold]right-> server3 : "sync"
+
+legend right
+    |= Color |= Significado |
+    | <back:#90EE90>     </back> | PRIMARY (Nodo activo) |
+    | <back:#FFE4B5>     </back> | BACKUP (Nodo de respaldo) |
+    |= Línea |= Tipo |
+    | <color:#1976D2>━━━━</color> | Petición Cliente → DNS |
+    | <color:#E65100>━━━━</color> | Respuesta DNS → Server |
+    | <color:#43A047>━━━━</color> | Sincronización |
+endlegend
+@enduml
+
+PlantUML version 1.2022.7(Mon Aug 22 17:01:30 UTC 2022)
+(GPL source distribution)
+Java Runtime: OpenJDK Runtime Environment
+JVM: OpenJDK 64-Bit Server VM
+Default Encoding: UTF-8
+Language: en
+Country: null
+--></g></svg>

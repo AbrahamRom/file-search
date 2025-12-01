@@ -1,0 +1,85 @@
+@startuml comunicacion_capas
+
+!define PRIMARY_COLOR #90EE90
+!define BACKUP_COLOR #FFE4B5
+!define CAPA_CLIENTE #e3f2fd
+!define CAPA_DNS #f3e5f5
+!define CAPA_SERVER #fff3e0
+
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam defaultFontSize 11
+skinparam dpi 150
+
+skinparam rectangle {
+    roundCorner 10
+}
+
+title Comunicación Cliente-Servidor con Alta Disponibilidad\nModelo PRIMARY-BACKUP en 3 Capas
+
+' ========== CAPA CLIENTE (HA) ==========
+rectangle "**CAPA CLIENTE (HA)**" as capa_cliente CAPA_CLIENTE {
+    together {
+        rectangle "client_1 **(PRIMARY)**\nNodo 1" as client1 PRIMARY_COLOR
+        rectangle "client_2 (BACKUP)\nNodo 2" as client2 BACKUP_COLOR
+        rectangle "client_3 (BACKUP)\nNodo 1" as client3 BACKUP_COLOR
+    }
+}
+
+' ========== CAPA DNS (HA) ==========
+rectangle "**CAPA DNS (HA)**" as capa_dns CAPA_DNS {
+    together {
+        rectangle "dns_1 **(PRIMARY)**\nNodo 1" as dns1 PRIMARY_COLOR
+        rectangle "dns_2 (BACKUP)\nNodo 2" as dns2 BACKUP_COLOR
+        rectangle "dns_3 (BACKUP)\nNodo 1" as dns3 BACKUP_COLOR
+    }
+}
+
+' ========== CAPA SERVIDORES API (HA) ==========
+rectangle "**CAPA SERVIDORES API (HA)**" as capa_server CAPA_SERVER {
+    together {
+        rectangle "server_1 **(PRIMARY)**\nAPI + SQLite + Files\nNodo 1" as server1 PRIMARY_COLOR
+        rectangle "server_2 (BACKUP)\nsync cada 10s\nNodo 2" as server2 BACKUP_COLOR
+        rectangle "server_3 (BACKUP)\nsync cada 10s\nNodo 1" as server3 BACKUP_COLOR
+    }
+}
+
+' ========== LAYOUT HORIZONTAL ==========
+client1 -[hidden]right- client2
+client2 -[hidden]right- client3
+
+dns1 -[hidden]right- dns2
+dns2 -[hidden]right- dns3
+
+server1 -[hidden]right- server2
+server2 -[hidden]right- server3
+
+' ========== CONEXIONES ENTRE CAPAS ==========
+' Clientes hacia DNS
+client1 -[#1976D2,bold]down-> dns1 : "GET /server/resolve"
+client2 -[#1976D2,dashed]down-> dns1
+client3 -[#1976D2,dashed]down-> dns1
+
+' Sincronización DNS
+dns2 -[#9C27B0,dashed]left-> dns1 : "sync"
+dns3 -[#9C27B0,dashed]left-> dns2
+
+' DNS hacia Servidores
+dns1 -[#E65100,bold]down-> server1 : "{server_id, url, role}"
+
+' Sincronización Servidores
+server1 -[#43A047,bold]right-> server2 : "sync"
+server2 -[#43A047,bold]right-> server3 : "sync"
+
+' ========== LEYENDA ==========
+legend right
+    |= Color |= Significado |
+    | <back:PRIMARY_COLOR>     </back> | PRIMARY (Nodo activo) |
+    | <back:BACKUP_COLOR>     </back> | BACKUP (Nodo de respaldo) |
+    |= Línea |= Tipo |
+    | <color:#1976D2>━━━━</color> | Petición Cliente → DNS |
+    | <color:#E65100>━━━━</color> | Respuesta DNS → Server |
+    | <color:#43A047>━━━━</color> | Sincronización |
+endlegend
+
+@enduml
