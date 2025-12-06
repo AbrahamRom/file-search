@@ -70,18 +70,18 @@ def get_file(file_id: str) -> Optional[dict]:
         return dict(row) if row else None
 
 def search_files(*, query: str, limit: int = 10, offset: int = 0) -> List[dict]:
-    """Search files by name or path using a simple LIKE query."""
+    """Search files by name only using a simple LIKE query."""
     like_query = f"%{query}%"
     sql = """
     SELECT file_id, name, path, size, last_modified
     FROM files
-    WHERE name LIKE ? OR path LIKE ?
+    WHERE name LIKE ?
     ORDER BY name ASC
     LIMIT ? OFFSET ?
     """
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute(sql, (like_query, like_query, limit, offset))
+        cur.execute(sql, (like_query, limit, offset))
         rows = cur.fetchall()
         return [dict(row) for row in rows]
 
