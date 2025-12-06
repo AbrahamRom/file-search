@@ -47,6 +47,7 @@ try:
         setup_page,
         show_error,
         show_warning,
+        upload_form,
     )
 except ModuleNotFoundError:
     from ui_components import (
@@ -56,6 +57,7 @@ except ModuleNotFoundError:
         setup_page,
         show_error,
         show_warning,
+        upload_form,
     )
 
 # --- Configuración de Servicio ---
@@ -173,10 +175,13 @@ def make_request_with_retry(method: str, path: str, **kwargs) -> requests.Respon
             url = api_url(path)
             logger.debug(f"Intento {attempt}: {method} {url}")
             
+            # Mayor timeout para POST con archivos
+            timeout = 60 if method.upper() == "POST" and "files" in kwargs else 15
+            
             if method.upper() == "GET":
-                response = requests.get(url, timeout=15, **kwargs)
+                response = requests.get(url, timeout=timeout, **kwargs)
             elif method.upper() == "POST":
-                response = requests.post(url, timeout=15, **kwargs)
+                response = requests.post(url, timeout=timeout, **kwargs)
             else:
                 raise ValueError(f"Método no soportado: {method}")
             
@@ -206,6 +211,34 @@ def fetch_files(query: str, *, limit: int, offset: int) -> List[Dict]:
     params = {"query": query, "limit": limit, "offset": offset}
     response = make_request_with_retry("GET", "search", params=params)
     return response.json()
+
+
+def upload_file_to_server(uploaded_file, folder: str = "") -> dict:
+    """
+    Sube un archivo al servidor usando el endpoint /upload.
+    
+    Args:
+        uploaded_file: Archivo desde st.file_uploader
+        folder: Carpeta destino opcional
+    
+    Returns:
+        Respuesta JSON del servidor
+    """
+    try:
+        # Preparar el archivo para enviarlo
+        files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+        data = {}
+        
+        if folder:
+            data["folder"] = folder
+        
+        # Enviar con reintentos
+        response = make_request_with_retry("POST", "upload", files=files, data=data)
+        return response.json()
+    
+    except Exception as e:
+        logger.error(f"Error al subir archivo: {e}")
+        raise
 
 
 def humanize_datetime(value: str) -> str:
@@ -249,6 +282,24 @@ def on_search_submit():
 def main() -> None:
     ensure_state_defaults()
     setup_page()
+    
+    # ========== Formulario de subida ==========
+    uploaded_file, folder, upload_submitted = upload_form()
+    
+    if upload_submitted and uploaded_file:
+        with st.spinner(f"Subiendo {uploaded_file.name}..."):
+            try:
+                result = upload_file_to_server(uploaded_file, folder)
+                st.success(
+                    f"✅ Archivo '{result['filename']}' subido correctamente "
+                    f"({result['size']} bytes)"
+                )
+                # Limpiar cache para que aparezca en búsquedas
+                fetch_files.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Error al subir archivo: {str(e)}")
+    # ==========================================
     
     if "search_query" not in st.session_state:
         st.session_state.search_query = st.session_state.query

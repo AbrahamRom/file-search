@@ -76,6 +76,32 @@ def search_form(
 	return query, type_choice, limit_choice, submitted
 
 
+def upload_form() -> tuple[Optional[object], Optional[str], bool]:
+	"""Renderiza el formulario de subida de archivos."""
+	
+	with st.expander("📤 Subir nuevo archivo", expanded=False):
+		with st.form("upload_form", clear_on_submit=True):
+			uploaded_file = st.file_uploader(
+				"Selecciona un archivo",
+				type=None,  # Permite cualquier tipo de archivo
+				help="Sube un archivo al repositorio compartido"
+			)
+			
+			folder = st.text_input(
+				"Carpeta destino (opcional)",
+				value="",
+				placeholder="Ej. documentos/2025",
+				help="Deja vacío para subir a la raíz"
+			)
+			
+			submitted = st.form_submit_button("Subir archivo", type="primary")
+			
+			if submitted and uploaded_file is not None:
+				return uploaded_file, folder.strip(), True
+	
+	return None, None, False
+
+
 def render_results(
 	records: List[dict],
 	*,
@@ -143,6 +169,7 @@ def show_warning(message: str) -> None:
 __all__ = [
 	"setup_page",
 	"search_form",
+	"upload_form",
 	"render_results",
 	"pagination_controls",
 	"show_error",
