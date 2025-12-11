@@ -14,6 +14,7 @@ The Processor Node is STATELESS:
 - DNS handles failover and returns the active node
 """
 
+import asyncio
 import importlib
 import logging
 import os
@@ -63,6 +64,12 @@ PROCESSOR_ID = os.getenv("PROCESSOR_ID", "processor_1")
 # DNS configuration for discovering Storage Nodes
 DNS_ALIAS = os.getenv("DNS_ALIAS", "dns")
 DNS_PORT = int(os.getenv("DNS_SERVICE_PORT", 5353))
+
+# Heartbeat interval for DNS registration
+HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", 5))
+
+# Flag para controlar el loop de heartbeat
+_heartbeat_task: Optional[asyncio.Task] = None
 
 
 # ============================================================================
@@ -117,6 +124,113 @@ _storage_client: Optional[StorageClient] = None
 _dns_client: Optional[DNSClientHA] = None
 
 
+# ============================================================================
+# DNS REGISTRATION FOR PROCESSORS
+# ============================================================================
+
+async def _get_my_ip() -> str:
+    """Get this processor's IP address visible to other containers."""
+    import socket
+    try:
+        # Get the IP address that would be used to reach DNS
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect((DNS_ALIAS, DNS_PORT))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return socket.gethostbyname(socket.gethostname())
+
+
+async def _discover_dns_url() -> Optional[str]:
+    """Discover a DNS server URL."""
+    import socket
+    try:
+        results = socket.getaddrinfo(DNS_ALIAS, DNS_PORT, socket.AF_INET, socket.SOCK_STREAM)
+        ips = sorted(set(result[4][0] for result in results))
+        if ips:
+            return f"http://{ips[0]}:{DNS_PORT}"
+    except Exception as e:
+        logger.warning("Error discovering DNS: %s", e)
+    return None
+
+
+async def _register_with_dns():
+    """Register this processor with the DNS service."""
+    import httpx
+    
+    dns_url = await _discover_dns_url()
+    if not dns_url:
+        logger.error("Could not discover DNS server for registration")
+        return False
+    
+    my_ip = await _get_my_ip()
+    port = int(os.getenv("PROCESSOR_PORT", 8000))
+    
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"{dns_url}/processor/register",
+                json={
+                    "processor_id": PROCESSOR_ID,
+                    "ip": my_ip,
+                    "port": port
+                }
+            )
+            if response.status_code == 200:
+                data = response.json()
+                logger.info("Registered with DNS: %s (total processors: %d)", 
+                           PROCESSOR_ID, data.get("total_processors", 0))
+                return True
+            else:
+                logger.error("DNS registration failed: %s", response.text)
+    except Exception as e:
+        logger.error("Error registering with DNS: %s", e)
+    
+    return False
+
+
+async def _send_heartbeat():
+    """Send heartbeat to DNS service."""
+    import httpx
+    
+    dns_url = await _discover_dns_url()
+    if not dns_url:
+        return False
+    
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"{dns_url}/processor/heartbeat",
+                json={"processor_id": PROCESSOR_ID}
+            )
+            return response.status_code == 200
+    except Exception as e:
+        logger.debug("Heartbeat failed: %s", e)
+        # Try to re-register if heartbeat fails
+        return await _register_with_dns()
+
+
+async def _heartbeat_loop():
+    """Background task that sends periodic heartbeats to DNS."""
+    logger.info("Starting heartbeat loop (interval: %ds)", HEARTBEAT_INTERVAL)
+    
+    # Initial registration
+    await _register_with_dns()
+    
+    while True:
+        try:
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            success = await _send_heartbeat()
+            if not success:
+                logger.warning("Heartbeat failed, will retry...")
+        except asyncio.CancelledError:
+            logger.info("Heartbeat loop cancelled")
+            break
+        except Exception as e:
+            logger.error("Error in heartbeat loop: %s", e)
+
+
 async def get_storage_client_instance() -> StorageClient:
     """Get or create the storage client instance."""
     global _storage_client, _dns_client
@@ -139,12 +253,30 @@ async def get_storage_client_instance() -> StorageClient:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
+    global _heartbeat_task
+    
     # Startup
     logger.info("Processor Node %s starting...", PROCESSOR_ID)
     await get_storage_client_instance()
+    
+    # Start heartbeat loop for DNS registration
+    _heartbeat_task = asyncio.create_task(_heartbeat_loop())
+    logger.info("Heartbeat task started")
+    
     yield
+    
     # Shutdown
     global _storage_client, _dns_client
+    
+    # Cancel heartbeat task
+    if _heartbeat_task:
+        _heartbeat_task.cancel()
+        try:
+            await _heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        _heartbeat_task = None
+    
     if _storage_client:
         await _storage_client.__aexit__(None, None, None)
         _storage_client = None

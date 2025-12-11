@@ -93,8 +93,8 @@ def _discover_dns_url() -> Optional[str]:
 
 def _resolve_server_from_dns() -> Optional[str]:
     """
-    Pregunta al DNS por el servidor API PRIMARY actual.
-    Usa el endpoint /server/resolve.
+    Pregunta al DNS por un Processor Node disponible.
+    Usa el endpoint /processor/resolve.
     """
     global _cached_server_url, _cache_timestamp
     
@@ -108,17 +108,17 @@ def _resolve_server_from_dns() -> Optional[str]:
         return None
     
     try:
-        response = requests.get(f"{dns_url}/server/resolve", timeout=5)
+        response = requests.get(f"{dns_url}/processor/resolve", timeout=5)
         if response.status_code == 200:
             data = response.json()
             server_url = data.get("url")
             if server_url:
                 _cached_server_url = server_url
                 _cache_timestamp = time.time()
-                logger.info(f"Servidor resuelto via DNS: {server_url}")
+                logger.info(f"Processor resuelto via DNS: {server_url}")
                 return server_url
         elif response.status_code == 503:
-            logger.warning("DNS reporta que no hay servidores disponibles")
+            logger.warning("DNS reporta que no hay processors disponibles")
     except Exception as e:
         logger.error(f"Error consultando DNS: {e}")
     

@@ -78,11 +78,21 @@ start_time = time.time()
 # {server_id: {ip, port, role, last_heartbeat, registered_at}}
 api_servers: Dict[str, dict] = {}
 
+# Estado de los PROCESSOR nodes registrados
+# {processor_id: {ip, port, last_heartbeat, registered_at, healthy}}
+processor_servers: Dict[str, dict] = {}
+
 # Timeout para considerar un servidor API como caído (en segundos)
 API_SERVER_TIMEOUT = int(os.getenv("API_SERVER_TIMEOUT", 15))
 
+# Timeout para processors (en segundos)
+PROCESSOR_TIMEOUT = int(os.getenv("PROCESSOR_TIMEOUT", 15))
+
 # Lock para operaciones atómicas en api_servers
 api_servers_lock = asyncio.Lock()
+
+# Lock para operaciones atómicas en processor_servers
+processor_servers_lock = asyncio.Lock()
 
 
 # ============================================================================
@@ -182,6 +192,27 @@ class APIServerResolveResponse(BaseModel):
     ip: str
     port: int
     role: str
+    url: str
+
+
+# ============================================================================
+# MODELOS PARA PROCESSOR NODES
+# ============================================================================
+
+class ProcessorRegisterRequest(BaseModel):
+    processor_id: str
+    ip: str
+    port: int = 8000
+
+
+class ProcessorHeartbeatRequest(BaseModel):
+    processor_id: str
+
+
+class ProcessorResolveResponse(BaseModel):
+    processor_id: str
+    ip: str
+    port: int
     url: str
 
 
@@ -588,6 +619,126 @@ async def list_api_servers():
         return {
             "servers": servers,
             "total": len(servers),
+            "timestamp": now.isoformat()
+        }
+
+
+# ============================================================================
+# ENDPOINTS PARA PROCESSOR NODES
+# ============================================================================
+
+@app.post("/processor/register")
+async def register_processor(request: ProcessorRegisterRequest):
+    """
+    Registra un Processor Node en el DNS.
+    Los processors son stateless y todos tienen el mismo peso.
+    """
+    async with processor_servers_lock:
+        now = datetime.now().isoformat()
+        
+        processor_servers[request.processor_id] = {
+            "ip": request.ip,
+            "port": request.port,
+            "last_heartbeat": now,
+            "registered_at": now,
+            "healthy": True
+        }
+        
+        logger.info(f"[{server_id}] Processor {request.processor_id} registrado ({request.ip}:{request.port})")
+        
+        return {
+            "status": "registered",
+            "processor_id": request.processor_id,
+            "total_processors": len(processor_servers)
+        }
+
+
+@app.post("/processor/heartbeat")
+async def processor_heartbeat(request: ProcessorHeartbeatRequest):
+    """
+    Recibe heartbeat de un Processor para mantenerlo activo.
+    """
+    async with processor_servers_lock:
+        if request.processor_id not in processor_servers:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Processor {request.processor_id} no registrado. Debe registrarse primero."
+            )
+        
+        now_iso = datetime.now().isoformat()
+        processor_servers[request.processor_id]["last_heartbeat"] = now_iso
+        processor_servers[request.processor_id]["healthy"] = True
+        
+        return {
+            "status": "ok",
+            "processor_id": request.processor_id,
+            "timestamp": now_iso
+        }
+
+
+@app.get("/processor/resolve", response_model=ProcessorResolveResponse)
+async def resolve_processor():
+    """
+    Resuelve un Processor Node disponible.
+    Usa round-robin simple entre los processors activos.
+    """
+    async with processor_servers_lock:
+        now = datetime.now()
+        active_processors = []
+        
+        # Filtrar processors activos
+        for pid, info in processor_servers.items():
+            last_hb = datetime.fromisoformat(info["last_heartbeat"])
+            elapsed = (now - last_hb).total_seconds()
+            
+            if elapsed < PROCESSOR_TIMEOUT:
+                active_processors.append((pid, info))
+        
+        if not active_processors:
+            logger.error(f"[{server_id}] No hay processors disponibles")
+            raise HTTPException(status_code=503, detail="No hay processors disponibles")
+        
+        # Round-robin simple: usar el primero de la lista ordenada
+        # (en producción podrías implementar un índice rotativo)
+        active_processors.sort(key=lambda x: x[0])
+        pid, info = active_processors[0]
+        
+        logger.info(f"[{server_id}] Resolución de processor -> {pid} ({info['ip']}:{info['port']})")
+        
+        return ProcessorResolveResponse(
+            processor_id=pid,
+            ip=info["ip"],
+            port=info["port"],
+            url=f"http://{info['ip']}:{info['port']}"
+        )
+
+
+@app.get("/processor/list")
+async def list_processors():
+    """Lista todos los Processor Nodes registrados con su estado."""
+    async with processor_servers_lock:
+        now = datetime.now()
+        processors = []
+        
+        for pid, info in processor_servers.items():
+            last_hb = datetime.fromisoformat(info["last_heartbeat"])
+            elapsed = (now - last_hb).total_seconds()
+            
+            processors.append({
+                "processor_id": pid,
+                "ip": info["ip"],
+                "port": info["port"],
+                "last_heartbeat": info["last_heartbeat"],
+                "registered_at": info["registered_at"],
+                "url": f"http://{info['ip']}:{info['port']}",
+                "alive": elapsed < PROCESSOR_TIMEOUT,
+                "seconds_since_heartbeat": int(elapsed)
+            })
+        
+        return {
+            "processors": processors,
+            "total": len(processors),
+            "active": sum(1 for p in processors if p["alive"]),
             "timestamp": now.isoformat()
         }
 
