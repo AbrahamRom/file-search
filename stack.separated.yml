@@ -1,0 +1,355 @@
+# ============================================================================
+# Docker Swarm Stack - Arquitectura Separada (Storage + Processor)
+# ============================================================================
+#
+# Deployment para producción con Docker Swarm.
+# 
+# Arquitectura:
+# - DNS Service (3 réplicas): Descubrimiento y coordinación
+# - Storage Nodes (3 réplicas): BD + archivos con replicación PRIMARY-BACKUP
+# - Processor Nodes (2 réplicas): Capa stateless escalable
+# - Client (1 réplica): Interfaz web
+#
+# ============================================================================
+
+version: "3.9"
+
+services:
+  # ============================================================================
+  # DNS SERVICES
+  # ============================================================================
+  
+  dns_1:
+    image: file-search-dns:latest
+    environment:
+      - LOG_DIR=/app/logs
+      - LOG_LEVEL=INFO
+      - DNS_SERVER_ID=dns_1
+      - DNS_PORT=5353
+      - DNS_ALIAS=dns
+      - HEALTH_CHECK_INTERVAL=5
+      - SYNC_INTERVAL=30
+      - DISCOVERY_INTERVAL=15
+      - API_SERVER_TIMEOUT=15
+    volumes:
+      - type: bind
+        source: ${LOGS_SOURCE:-/srv/file-search/logs}
+        target: /app/logs
+    networks:
+      file_search_net:
+        aliases:
+          - dns
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == manager
+    ports:
+      - target: 5353
+        published: 5353
+        mode: ingress
+
+  dns_2:
+    image: file-search-dns:latest
+    environment:
+      - LOG_DIR=/app/logs
+      - LOG_LEVEL=INFO
+      - DNS_SERVER_ID=dns_2
+      - DNS_PORT=5353
+      - DNS_ALIAS=dns
+      - HEALTH_CHECK_INTERVAL=5
+      - SYNC_INTERVAL=30
+      - DISCOVERY_INTERVAL=15
+      - API_SERVER_TIMEOUT=15
+    volumes:
+      - type: bind
+        source: ${LOGS_SOURCE:-/srv/file-search/logs}
+        target: /app/logs
+    networks:
+      file_search_net:
+        aliases:
+          - dns
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == worker
+    ports:
+      - target: 5353
+        published: 5354
+        mode: ingress
+
+  dns_3:
+    image: file-search-dns:latest
+    environment:
+      - LOG_DIR=/app/logs
+      - LOG_LEVEL=INFO
+      - DNS_SERVER_ID=dns_3
+      - DNS_PORT=5353
+      - DNS_ALIAS=dns
+      - HEALTH_CHECK_INTERVAL=5
+      - SYNC_INTERVAL=30
+      - DISCOVERY_INTERVAL=15
+      - API_SERVER_TIMEOUT=15
+    volumes:
+      - type: bind
+        source: ${LOGS_SOURCE:-/srv/file-search/logs}
+        target: /app/logs
+    networks:
+      file_search_net:
+        aliases:
+          - dns
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == worker
+    ports:
+      - target: 5353
+        published: 5355
+        mode: ingress
+
+  # ============================================================================
+  # STORAGE NODES - Base de datos y archivos
+  # ============================================================================
+
+  storage_1:
+    image: file-search-storage:latest
+    environment:
+      - STORAGE_ID=storage_1
+      - STORAGE_PORT=8000
+      - SERVER_ID=storage_1
+      - SERVER_PORT=8000
+      - FILES_ROOT=/app/files
+      - FILES_SOURCE_PATH=/tmp/source_files
+      - LOG_DIR=/app/logs
+      - DB_PATH=/app/data/storage.db
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      - HEARTBEAT_INTERVAL=5
+      - SYNC_INTERVAL=10
+    volumes:
+      - type: bind
+        source: ${FILES_SOURCE:-/srv/file-search/files}
+        target: /tmp/source_files
+        read_only: true
+      - type: bind
+        source: ${LOGS_SOURCE:-/srv/file-search/logs}
+        target: /app/logs
+    networks:
+      file_search_net:
+        aliases:
+          - storage
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == manager
+    ports:
+      - target: 8000
+        published: 9000
+        mode: ingress
+
+  storage_2:
+    image: file-search-storage:latest
+    environment:
+      - STORAGE_ID=storage_2
+      - STORAGE_PORT=8000
+      - SERVER_ID=storage_2
+      - SERVER_PORT=8000
+      - FILES_ROOT=/app/files
+      - FILES_SOURCE_PATH=/tmp/source_files
+      - LOG_DIR=/app/logs
+      - DB_PATH=/app/data/storage.db
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      - HEARTBEAT_INTERVAL=5
+      - SYNC_INTERVAL=10
+    volumes:
+      - type: bind
+        source: ${FILES_SOURCE:-/srv/file-search/files}
+        target: /tmp/source_files
+        read_only: true
+      - type: bind
+        source: ${LOGS_SOURCE:-/srv/file-search/logs}
+        target: /app/logs
+    networks:
+      file_search_net:
+        aliases:
+          - storage
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == worker
+    ports:
+      - target: 8000
+        published: 9001
+        mode: ingress
+
+  storage_3:
+    image: file-search-storage:latest
+    environment:
+      - STORAGE_ID=storage_3
+      - STORAGE_PORT=8000
+      - SERVER_ID=storage_3
+      - SERVER_PORT=8000
+      - FILES_ROOT=/app/files
+      - FILES_SOURCE_PATH=/tmp/source_files
+      - LOG_DIR=/app/logs
+      - DB_PATH=/app/data/storage.db
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      - HEARTBEAT_INTERVAL=5
+      - SYNC_INTERVAL=10
+    volumes:
+      - type: bind
+        source: ${FILES_SOURCE:-/srv/file-search/files}
+        target: /tmp/source_files
+        read_only: true
+      - type: bind
+        source: ${LOGS_SOURCE:-/srv/file-search/logs}
+        target: /app/logs
+    networks:
+      file_search_net:
+        aliases:
+          - storage
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == worker
+    ports:
+      - target: 8000
+        published: 9002
+        mode: ingress
+
+  # ============================================================================
+  # PROCESSOR NODES - Capa stateless escalable
+  # ============================================================================
+
+  processor_1:
+    image: file-search-processor:latest
+    environment:
+      - PROCESSOR_ID=processor_1
+      - PROCESSOR_PORT=8000
+      - STORAGE_NODES=http://storage_1:8000,http://storage_2:8000,http://storage_3:8000
+      - STORAGE_URL=http://storage_1:8000
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      - STORAGE_TIMEOUT=10
+      - STORAGE_MAX_RETRIES=3
+      - STORAGE_RETRY_DELAY=0.5
+      - LOG_DIR=/app/logs
+    volumes:
+      - type: bind
+        source: ${LOGS_SOURCE:-/srv/file-search/logs}
+        target: /app/logs
+    networks:
+      - file_search_net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == manager
+    ports:
+      - target: 8000
+        published: 8000
+        mode: ingress
+
+  processor_2:
+    image: file-search-processor:latest
+    environment:
+      - PROCESSOR_ID=processor_2
+      - PROCESSOR_PORT=8000
+      - STORAGE_NODES=http://storage_1:8000,http://storage_2:8000,http://storage_3:8000
+      - STORAGE_URL=http://storage_1:8000
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      - STORAGE_TIMEOUT=10
+      - STORAGE_MAX_RETRIES=3
+      - STORAGE_RETRY_DELAY=0.5
+      - LOG_DIR=/app/logs
+    volumes:
+      - type: bind
+        source: ${LOGS_SOURCE:-/srv/file-search/logs}
+        target: /app/logs
+    networks:
+      - file_search_net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == worker
+    ports:
+      - target: 8000
+        published: 8001
+        mode: ingress
+
+  # ============================================================================
+  # CLIENT
+  # ============================================================================
+  
+  client:
+    image: file-search-client:latest
+    environment:
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      - TARGET_SERVICE_NAME=processor
+      - TARGET_SERVICE_PORT=8000
+      - API_BASE_URL=http://processor_1:8000
+      - BROWSER_API_URL=${BROWSER_API_URL:-http://localhost:8000}
+      - MAX_RETRIES=3
+      - RETRY_DELAY=0.5
+    networks:
+      - file_search_net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == worker
+    ports:
+      - target: 8501
+        published: 8501
+        mode: ingress
+
+networks:
+  file_search_net:
+    driver: overlay
+    attachable: true

@@ -1,0 +1,40 @@
+# ============================================================================
+# Storage Node Dockerfile
+# Contains: SQLite database, file storage, sync service
+# ============================================================================
+
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install requirements
+COPY app/storage/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
+
+# Copy application code
+COPY app/__init__.py /app/__init__.py
+COPY app/storage /app/storage
+
+# Create internal directories (data and files live inside the container)
+RUN mkdir -p /app/files /app/logs /app/data /tmp/source_files
+
+# Only logs are exposed as persistent volume
+VOLUME ["/app/logs"]
+
+# Copy and set permissions for entrypoint
+COPY app/storage/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# Environment configuration
+ENV PYTHONPATH=/app
+ENV FILES_ROOT=/app/files
+ENV FILES_SOURCE_PATH=/tmp/source_files
+ENV DB_PATH=/app/data/storage.db
+ENV STORAGE_PORT=8000
+
+EXPOSE 8000
+
+# Use entrypoint script
+ENTRYPOINT ["/app/entrypoint.sh"]

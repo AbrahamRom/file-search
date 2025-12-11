@@ -1,0 +1,317 @@
+"""
+Node Manager for Storage Node.
+Handles registration with DNS, heartbeats, and role management (PRIMARY/BACKUP).
+"""
+
+import asyncio
+import logging
+import os
+import socket
+from typing import Optional, Dict, Callable
+from datetime import datetime
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+# Configuration
+DNS_ALIAS = os.getenv("DNS_ALIAS", "dns")
+DNS_PORT = int(os.getenv("DNS_SERVICE_PORT", 5353))
+SERVER_ID = os.getenv("STORAGE_ID", os.getenv("SERVER_ID", f"storage_{socket.gethostname()}"))
+SERVER_PORT = int(os.getenv("STORAGE_PORT", os.getenv("SERVER_PORT", 8000)))
+HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", 5))
+DNS_RETRY_INTERVAL = int(os.getenv("DNS_RETRY_INTERVAL", 3))
+DNS_MAX_RETRIES = int(os.getenv("DNS_MAX_RETRIES", 10))
+
+
+class NodeManager:
+    """
+    Manages the lifecycle of a Storage Node in the cluster:
+    - Initial registration with DNS
+    - Periodic heartbeats
+    - Role change handling (PRIMARY <-> BACKUP)
+    """
+    
+    def __init__(self):
+        self.server_id = SERVER_ID
+        self.server_port = SERVER_PORT
+        self.dns_alias = DNS_ALIAS
+        self.dns_port = DNS_PORT
+        
+        self._role: str = "UNKNOWN"
+        self._primary_info: Optional[Dict] = None
+        self._my_ip: Optional[str] = None
+        self._dns_url: Optional[str] = None
+        self._registered: bool = False
+        self._running: bool = False
+        
+        # Callbacks for role changes
+        self._on_become_primary: Optional[Callable] = None
+        self._on_become_backup: Optional[Callable] = None
+        
+        logger.info(f"[NodeManager] Initialized: server_id={self.server_id}, port={self.server_port}")
+    
+    @property
+    def role(self) -> str:
+        return self._role
+    
+    @property
+    def is_primary(self) -> bool:
+        return self._role == "PRIMARY"
+    
+    @property
+    def is_backup(self) -> bool:
+        return self._role == "BACKUP"
+    
+    @property
+    def primary_info(self) -> Optional[Dict]:
+        """Info of the current PRIMARY (only relevant if we're BACKUP)."""
+        return self._primary_info
+    
+    @property
+    def primary_url(self) -> Optional[str]:
+        """URL of the current PRIMARY."""
+        if self._primary_info:
+            return self._primary_info.get("url")
+        return None
+    
+    def set_callbacks(
+        self, 
+        on_become_primary: Optional[Callable] = None,
+        on_become_backup: Optional[Callable] = None,
+    ):
+        """Configure callbacks for role changes."""
+        self._on_become_primary = on_become_primary
+        self._on_become_backup = on_become_backup
+    
+    def _get_my_ip(self) -> Optional[str]:
+        """Get this container's IP address."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            try:
+                return socket.gethostbyname(socket.gethostname())
+            except Exception:
+                return None
+    
+    def _discover_dns(self) -> Optional[str]:
+        """
+        Discover a DNS server using the Docker DNS alias.
+        Returns the URL of the first available DNS server.
+        """
+        try:
+            results = socket.getaddrinfo(
+                self.dns_alias, 
+                self.dns_port, 
+                socket.AF_INET, 
+                socket.SOCK_STREAM,
+            )
+            ips = sorted(set(result[4][0] for result in results))
+            
+            if ips:
+                dns_ip = ips[0]
+                url = f"http://{dns_ip}:{self.dns_port}"
+                logger.info(f"[NodeManager] DNS discovered: {url} (of {len(ips)} available)")
+                return url
+                
+        except socket.gaierror as e:
+            logger.warning(f"[NodeManager] Could not resolve DNS alias '{self.dns_alias}': {e}")
+        except Exception as e:
+            logger.error(f"[NodeManager] Error discovering DNS: {e}")
+        
+        return None
+    
+    async def wait_for_dns(self) -> bool:
+        """
+        Wait until the DNS service is available.
+        Retries up to DNS_MAX_RETRIES times.
+        """
+        logger.info(f"[NodeManager] Waiting for DNS to be available...")
+        
+        for attempt in range(1, DNS_MAX_RETRIES + 1):
+            dns_url = self._discover_dns()
+            
+            if dns_url:
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        response = await client.get(f"{dns_url}/health")
+                        if response.status_code == 200:
+                            self._dns_url = dns_url
+                            logger.info(f"[NodeManager] DNS available at {dns_url} (attempt {attempt})")
+                            return True
+                except Exception as e:
+                    logger.debug(f"[NodeManager] DNS not responding: {e}")
+            
+            logger.info(f"[NodeManager] DNS not available, retrying in {DNS_RETRY_INTERVAL}s... ({attempt}/{DNS_MAX_RETRIES})")
+            await asyncio.sleep(DNS_RETRY_INTERVAL)
+        
+        logger.error(f"[NodeManager] DNS not available after {DNS_MAX_RETRIES} attempts")
+        return False
+    
+    async def register(self) -> bool:
+        """
+        Register this server with the DNS and get an assigned role.
+        """
+        if not self._dns_url:
+            if not await self.wait_for_dns():
+                return False
+        
+        self._my_ip = self._get_my_ip()
+        if not self._my_ip:
+            logger.error("[NodeManager] Could not get server IP")
+            return False
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{self._dns_url}/server/register",
+                    json={
+                        "server_id": self.server_id,
+                        "ip": self._my_ip,
+                        "port": self.server_port,
+                    },
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    old_role = self._role
+                    self._role = data.get("assigned_role", "UNKNOWN")
+                    self._primary_info = data.get("primary_info")
+                    self._registered = True
+                    
+                    logger.info(f"[NodeManager] *** REGISTERED as {self._role} ***")
+                    logger.info(f"[NodeManager] Server ID: {self.server_id}, IP: {self._my_ip}")
+                    
+                    if self._primary_info:
+                        logger.info(f"[NodeManager] Current PRIMARY: {self._primary_info}")
+                    
+                    # Notify role change
+                    if old_role != self._role:
+                        self._notify_role_change(old_role)
+                    
+                    return True
+                else:
+                    logger.error(f"[NodeManager] Registration error: {response.status_code} - {response.text}")
+                    
+        except Exception as e:
+            logger.error(f"[NodeManager] Error registering with DNS: {e}")
+        
+        return False
+    
+    async def send_heartbeat(self) -> bool:
+        """
+        Send a heartbeat to the DNS and process the response.
+        """
+        if not self._registered or not self._dns_url:
+            return False
+        
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.post(
+                    f"{self._dns_url}/server/heartbeat",
+                    json={
+                        "server_id": self.server_id,
+                        "current_role": self._role,
+                    },
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    new_role = data.get("assigned_role", self._role)
+                    new_primary_info = data.get("primary_info")
+                    
+                    # Detect role change
+                    if new_role != self._role:
+                        old_role = self._role
+                        self._role = new_role
+                        logger.warning(f"[NodeManager] *** ROLE CHANGE: {old_role} -> {new_role} ***")
+                        self._notify_role_change(old_role)
+                    
+                    # Update PRIMARY info
+                    if new_primary_info != self._primary_info:
+                        self._primary_info = new_primary_info
+                        if self._primary_info:
+                            logger.info(f"[NodeManager] PRIMARY updated: {self._primary_info}")
+                    
+                    return True
+                elif response.status_code == 404:
+                    # Not registered, re-register
+                    logger.warning("[NodeManager] Not registered in DNS, re-registering...")
+                    self._registered = False
+                    return await self.register()
+                    
+        except httpx.TimeoutException:
+            logger.warning("[NodeManager] Heartbeat timeout")
+            self._dns_url = self._discover_dns()
+        except Exception as e:
+            logger.error(f"[NodeManager] Heartbeat error: {e}")
+            self._dns_url = self._discover_dns()
+        
+        return False
+    
+    def _notify_role_change(self, old_role: str):
+        """Notify role changes via callbacks."""
+        if self._role == "PRIMARY" and self._on_become_primary:
+            try:
+                self._on_become_primary()
+            except Exception as e:
+                logger.error(f"[NodeManager] Error in on_become_primary callback: {e}")
+        
+        elif self._role == "BACKUP" and self._on_become_backup:
+            try:
+                self._on_become_backup()
+            except Exception as e:
+                logger.error(f"[NodeManager] Error in on_become_backup callback: {e}")
+    
+    async def heartbeat_loop(self):
+        """
+        Infinite loop that sends heartbeats periodically.
+        """
+        self._running = True
+        logger.info(f"[NodeManager] Starting heartbeat loop (interval: {HEARTBEAT_INTERVAL}s)")
+        
+        while self._running:
+            try:
+                await self.send_heartbeat()
+            except Exception as e:
+                logger.error(f"[NodeManager] Error in heartbeat loop: {e}")
+            
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+    
+    def stop(self):
+        """Stop the heartbeat loop."""
+        self._running = False
+        logger.info("[NodeManager] Stopped")
+    
+    def get_status(self) -> Dict:
+        """Return current node status."""
+        return {
+            "server_id": self.server_id,
+            "ip": self._my_ip,
+            "port": self.server_port,
+            "role": self._role,
+            "registered": self._registered,
+            "dns_url": self._dns_url,
+            "primary_info": self._primary_info,
+            "is_primary": self.is_primary,
+            "is_backup": self.is_backup,
+        }
+
+
+# Global NodeManager instance
+_node_manager: Optional[NodeManager] = None
+
+
+def get_node_manager() -> NodeManager:
+    """Get the global NodeManager instance."""
+    global _node_manager
+    if _node_manager is None:
+        _node_manager = NodeManager()
+    return _node_manager
+
+
+__all__ = ["NodeManager", "get_node_manager"]

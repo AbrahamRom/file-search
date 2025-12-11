@@ -390,6 +390,205 @@ class DNSClientHA:
     def force_refresh(self) -> None:
         """Fuerza una actualización de la lista de servidores"""
         self._refresh_server_list()
+    
+    # =========================================================================
+    # RESOLUCIÓN DE STORAGE NODES (para Processor)
+    # =========================================================================
+    
+    def resolve_storage_server(self) -> Optional[Dict[str, Any]]:
+        """
+        Resuelve el Storage Node activo mediante /server/resolve del DNS.
+        
+        El Processor NO conoce la diferencia entre PRIMARY/BACKUP.
+        Solo pregunta al DNS: "¿Dónde está el Storage Node?"
+        El DNS maneja failover y promoción internamente.
+        
+        Returns:
+            Dict con {server_id, ip, port, url, role} del Storage activo
+            None si no hay Storage disponible
+            
+        Raises:
+            Exception: Si no se puede contactar ningún servidor DNS
+        """
+        # Refrescar lista de servidores si es necesario
+        self._maybe_refresh_servers()
+        
+        # 1. Verificar cache de storage
+        with self._lock:
+            cached = self._cache.get("__storage_server__")
+            if cached and time.time() < cached["expires_at"]:
+                logger.debug(f"[DNSClientHA] Storage cache HIT: {cached['data']['server_id']}")
+                return cached["data"]
+        
+        # 2. Intentar con el primario primero
+        if self._primary_url:
+            result = self._try_resolve_storage(self._primary_url)
+            if result:
+                return result
+        
+        # 3. Intentar con cada servidor DNS en orden
+        with self._lock:
+            servers_copy = list(self._dns_servers)
+        
+        for server in servers_copy:
+            if not server.get("healthy"):
+                continue
+            
+            url = server.get("url")
+            if url == self._primary_url:
+                continue  # Ya lo intentamos
+            
+            result = self._try_resolve_storage(url)
+            if result:
+                return result
+        
+        # 4. Reintentar con servidores no healthy
+        logger.warning("[DNSClientHA] Todos los servidores healthy fallaron para storage, reintentando...")
+        for server in servers_copy:
+            if server.get("healthy"):
+                continue
+            
+            url = server.get("url")
+            result = self._try_resolve_storage(url)
+            if result:
+                server["healthy"] = True
+                return result
+        
+        logger.error("[DNSClientHA] No se pudo resolver Storage Node desde ningún DNS")
+        return None
+    
+    def _try_resolve_storage(self, dns_url: str) -> Optional[Dict[str, Any]]:
+        """
+        Intenta resolver el Storage Node activo desde un servidor DNS específico.
+        
+        Args:
+            dns_url: URL del servidor DNS (ej: http://dns_1:5353)
+            
+        Returns:
+            Dict con info del Storage Node o None si falla
+        """
+        try:
+            resolve_url = f"{dns_url}/server/resolve"
+            logger.debug(f"[DNSClientHA] Consultando Storage desde {dns_url}")
+            
+            response = requests.get(resolve_url, timeout=3.0)
+            
+            if response.status_code == 503:
+                # No hay storage disponible
+                logger.warning(f"[DNSClientHA] DNS reporta: no hay Storage disponible")
+                return None
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            result = {
+                "server_id": data.get("server_id"),
+                "ip": data.get("ip"),
+                "port": data.get("port"),
+                "url": data.get("url"),
+                "role": data.get("role", "PRIMARY"),
+            }
+            
+            # Guardar en cache (TTL corto para storage - 10 segundos)
+            with self._lock:
+                self._cache["__storage_server__"] = {
+                    "data": result,
+                    "expires_at": time.time() + 10,  # TTL de 10 segundos
+                    "resolved_by": dns_url,
+                }
+            
+            logger.info(
+                f"[DNSClientHA] Storage resuelto: {result['server_id']} -> {result['url']} (via {dns_url})"
+            )
+            return result
+            
+        except requests.Timeout:
+            logger.warning(f"[DNSClientHA] Timeout consultando storage desde {dns_url}")
+            self._mark_server_unhealthy(dns_url)
+        except requests.RequestException as e:
+            logger.warning(f"[DNSClientHA] Error consultando storage desde {dns_url}: {e}")
+            self._mark_server_unhealthy(dns_url)
+        except Exception as e:
+            logger.error(f"[DNSClientHA] Error inesperado consultando storage desde {dns_url}: {e}")
+            self._mark_server_unhealthy(dns_url)
+        
+        return None
+    
+    def invalidate_storage_cache(self) -> None:
+        """
+        Invalida el cache del Storage Node.
+        
+        Llamar cuando el Storage Node actual falla (circuit breaker abre).
+        La siguiente llamada a resolve_storage_server() consultará al DNS
+        para obtener un nuevo Storage Node (posiblemente después de failover).
+        """
+        with self._lock:
+            if "__storage_server__" in self._cache:
+                old = self._cache["__storage_server__"]
+                logger.info(
+                    f"[DNSClientHA] Invalidando cache de Storage: {old['data']['server_id']}"
+                )
+                del self._cache["__storage_server__"]
+    
+    def get_storage_cache_status(self) -> Dict[str, Any]:
+        """Retorna el estado del cache de Storage Node."""
+        with self._lock:
+            cached = self._cache.get("__storage_server__")
+            if cached:
+                return {
+                    "cached": True,
+                    "server_id": cached["data"]["server_id"],
+                    "url": cached["data"]["url"],
+                    "expires_in": max(0, cached["expires_at"] - time.time()),
+                    "resolved_by": cached.get("resolved_by"),
+                }
+            return {
+                "cached": False,
+                "server_id": None,
+                "url": None,
+            }
+    
+    def list_storage_servers(self) -> List[Dict[str, Any]]:
+        """
+        Lista todos los Storage Nodes registrados en el DNS.
+        
+        Returns:
+            Lista de Storage Nodes con su estado
+        """
+        # Refrescar lista de servidores si es necesario
+        self._maybe_refresh_servers()
+        
+        # Intentar con el primario primero
+        if self._primary_url:
+            result = self._try_list_storage(self._primary_url)
+            if result is not None:
+                return result
+        
+        # Intentar con otros servidores
+        with self._lock:
+            servers_copy = list(self._dns_servers)
+        
+        for server in servers_copy:
+            if not server.get("healthy") or server.get("url") == self._primary_url:
+                continue
+            
+            result = self._try_list_storage(server.get("url"))
+            if result is not None:
+                return result
+        
+        logger.error("[DNSClientHA] No se pudo listar Storage Nodes")
+        return []
+    
+    def _try_list_storage(self, dns_url: str) -> Optional[List[Dict[str, Any]]]:
+        """Intenta listar Storage Nodes desde un DNS específico."""
+        try:
+            response = requests.get(f"{dns_url}/server/list", timeout=3.0)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("servers", [])
+        except Exception as e:
+            logger.warning(f"[DNSClientHA] Error listando storage desde {dns_url}: {e}")
+            return None
 
 
 # Alias para compatibilidad con código existente

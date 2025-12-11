@@ -210,7 +210,8 @@ def make_request_with_retry(method: str, path: str, **kwargs) -> requests.Respon
 def fetch_files(query: str, *, limit: int, offset: int) -> List[Dict]:
     params = {"query": query, "limit": limit, "offset": offset}
     response = make_request_with_retry("GET", "search", params=params)
-    return response.json()
+    data = response.json()
+    return data.get("results", data) if isinstance(data, dict) else data
 
 
 def upload_file_to_server(uploaded_file, folder: str = "") -> dict:

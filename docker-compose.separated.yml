@@ -1,0 +1,326 @@
+# ============================================================================
+# Docker Compose - Arquitectura Separada (Storage + Processor)
+# ============================================================================
+# 
+# Esta configuración separa el sistema en:
+# - DNS Service: Descubrimiento y coordinación de servicios
+# - Storage Nodes: Base de datos + archivos físicos (con replicación)
+# - Processor Nodes: Capa de procesamiento stateless (escalable horizontalmente)
+# - Client: Interfaz web Streamlit
+#
+# Los Processor Nodes se comunican con los Storage Nodes a través de HTTP.
+# Los Storage Nodes mantienen sincronización PRIMARY-BACKUP automática.
+#
+# ============================================================================
+
+services:
+  # ============================================================================
+  # SERVIDORES DNS CON ALTA DISPONIBILIDAD
+  # ============================================================================
+  
+  dns_1:
+    build:
+      context: .
+      dockerfile: app/dns_service/Dockerfile
+    ports:
+      - "5353:5353"
+    environment:
+      - LOG_DIR=/app/logs
+      - LOG_LEVEL=INFO
+      - DNS_SERVER_ID=dns_1
+      - DNS_PORT=5353
+      - DNS_ALIAS=dns
+      - HEALTH_CHECK_INTERVAL=5
+      - SYNC_INTERVAL=30
+      - DISCOVERY_INTERVAL=15
+      - API_SERVER_TIMEOUT=15
+    volumes:
+      - ./runtime/logs:/app/logs
+    restart: unless-stopped
+    networks:
+      app_network:
+        aliases:
+          - dns
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5353/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  dns_2:
+    build:
+      context: .
+      dockerfile: app/dns_service/Dockerfile
+    ports:
+      - "5354:5353"
+    environment:
+      - LOG_DIR=/app/logs
+      - LOG_LEVEL=INFO
+      - DNS_SERVER_ID=dns_2
+      - DNS_PORT=5353
+      - DNS_ALIAS=dns
+      - HEALTH_CHECK_INTERVAL=5
+      - SYNC_INTERVAL=30
+      - DISCOVERY_INTERVAL=15
+      - API_SERVER_TIMEOUT=15
+    volumes:
+      - ./runtime/logs:/app/logs
+    restart: unless-stopped
+    networks:
+      app_network:
+        aliases:
+          - dns
+    depends_on:
+      - dns_1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5353/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  dns_3:
+    build:
+      context: .
+      dockerfile: app/dns_service/Dockerfile
+    ports:
+      - "5355:5353"
+    environment:
+      - LOG_DIR=/app/logs
+      - LOG_LEVEL=INFO
+      - DNS_SERVER_ID=dns_3
+      - DNS_PORT=5353
+      - DNS_ALIAS=dns
+      - HEALTH_CHECK_INTERVAL=5
+      - SYNC_INTERVAL=30
+      - DISCOVERY_INTERVAL=15
+      - API_SERVER_TIMEOUT=15
+    volumes:
+      - ./runtime/logs:/app/logs
+    restart: unless-stopped
+    networks:
+      app_network:
+        aliases:
+          - dns
+    depends_on:
+      - dns_1
+      - dns_2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5353/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ============================================================================
+  # STORAGE NODES - Base de datos y archivos
+  # 1 PRIMARY + 2 BACKUPs con sincronización automática
+  # ============================================================================
+  
+  storage_1:
+    build:
+      context: .
+      dockerfile: Dockerfile.storage
+    ports:
+      - "9000:8000"
+    environment:
+      - STORAGE_ID=storage_1
+      - STORAGE_PORT=8000
+      # Alias para compatibilidad con DNS existente
+      - SERVER_ID=storage_1
+      - SERVER_PORT=8000
+      - FILES_ROOT=/app/files
+      - FILES_SOURCE_PATH=/tmp/source_files
+      - LOG_DIR=/app/logs
+      - DB_PATH=/app/data/storage.db
+      # Configuración DNS
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      # Configuración de sincronización
+      - HEARTBEAT_INTERVAL=5
+      - SYNC_INTERVAL=10
+    volumes:
+      # Archivos fuente (solo lectura, se copian al inicio)
+      - ${FILES_SOURCE:-./runtime/files}:/tmp/source_files:ro
+      # Logs compartidos
+      - ./runtime/logs:/app/logs
+    depends_on:
+      dns_1:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      app_network:
+        aliases:
+          - storage
+
+  storage_2:
+    build:
+      context: .
+      dockerfile: Dockerfile.storage
+    ports:
+      - "9001:8000"
+    environment:
+      - STORAGE_ID=storage_2
+      - STORAGE_PORT=8000
+      - SERVER_ID=storage_2
+      - SERVER_PORT=8000
+      - FILES_ROOT=/app/files
+      - FILES_SOURCE_PATH=/tmp/source_files
+      - LOG_DIR=/app/logs
+      - DB_PATH=/app/data/storage.db
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      - HEARTBEAT_INTERVAL=5
+      - SYNC_INTERVAL=10
+    volumes:
+      - ${FILES_SOURCE:-./runtime/files}:/tmp/source_files:ro
+      - ./runtime/logs:/app/logs
+    depends_on:
+      dns_1:
+        condition: service_healthy
+      storage_1:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      app_network:
+        aliases:
+          - storage
+
+  storage_3:
+    build:
+      context: .
+      dockerfile: Dockerfile.storage
+    ports:
+      - "9002:8000"
+    environment:
+      - STORAGE_ID=storage_3
+      - STORAGE_PORT=8000
+      - SERVER_ID=storage_3
+      - SERVER_PORT=8000
+      - FILES_ROOT=/app/files
+      - FILES_SOURCE_PATH=/tmp/source_files
+      - LOG_DIR=/app/logs
+      - DB_PATH=/app/data/storage.db
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      - HEARTBEAT_INTERVAL=5
+      - SYNC_INTERVAL=10
+    volumes:
+      - ${FILES_SOURCE:-./runtime/files}:/tmp/source_files:ro
+      - ./runtime/logs:/app/logs
+    depends_on:
+      dns_1:
+        condition: service_healthy
+      storage_1:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      app_network:
+        aliases:
+          - storage
+
+  # ============================================================================
+  # PROCESSOR NODES - Capa de procesamiento stateless
+  # Pueden escalarse horizontalmente sin coordinación
+  # Usan DNS para descubrir el Storage Node activo
+  # ============================================================================
+  
+  processor_1:
+    build:
+      context: .
+      dockerfile: Dockerfile.processor
+    ports:
+      - "8000:8000"
+    environment:
+      - PROCESSOR_ID=processor_1
+      - PROCESSOR_PORT=8000
+      # Configuración DNS - el Processor descubre Storage via DNS
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      # Cache de resolución DNS
+      - DNS_TIMEOUT=5
+      - DNS_CACHE_TTL=10
+      # Configuración de circuit breaker
+      - STORAGE_TIMEOUT=10
+      - STORAGE_MAX_RETRIES=3
+      - STORAGE_RETRY_DELAY=0.5
+      - LOG_DIR=/app/logs
+    volumes:
+      - ./runtime/logs:/app/logs
+    depends_on:
+      dns_1:
+        condition: service_healthy
+      storage_1:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - app_network
+
+  processor_2:
+    build:
+      context: .
+      dockerfile: Dockerfile.processor
+    ports:
+      - "8001:8000"
+    environment:
+      - PROCESSOR_ID=processor_2
+      - PROCESSOR_PORT=8000
+      # Configuración DNS - el Processor descubre Storage via DNS
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      # Cache de resolución DNS
+      - DNS_TIMEOUT=5
+      - DNS_CACHE_TTL=10
+      # Configuración de circuit breaker
+      - STORAGE_TIMEOUT=10
+      - STORAGE_MAX_RETRIES=3
+      - STORAGE_RETRY_DELAY=0.5
+      - LOG_DIR=/app/logs
+    volumes:
+      - ./runtime/logs:/app/logs
+    depends_on:
+      dns_1:
+        condition: service_healthy
+      storage_1:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - app_network
+
+  # ============================================================================
+  # CLIENTE WEB
+  # Se conecta a los Processor Nodes (no directamente a Storage)
+  # ============================================================================
+  
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    depends_on:
+      processor_1:
+        condition: service_started
+      dns_1:
+        condition: service_healthy
+    environment:
+      # DNS para descubrimiento
+      - DNS_ALIAS=dns
+      - DNS_SERVICE_PORT=5353
+      # Servicio objetivo (ahora apunta a Processor)
+      - TARGET_SERVICE_NAME=processor
+      - TARGET_SERVICE_PORT=8000
+      # Fallback directo a processor_1
+      - API_BASE_URL=http://processor_1:8000
+      - BROWSER_API_URL=http://localhost:8000
+      # Reintentos
+      - MAX_RETRIES=3
+      - RETRY_DELAY=0.5
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+    networks:
+      - app_network
+
+networks:
+  app_network:
+    driver: bridge
