@@ -129,17 +129,36 @@ _dns_client: Optional[DNSClientHA] = None
 # ============================================================================
 
 async def _get_my_ip() -> str:
-    """Get this processor's IP address visible to other containers."""
+    """
+    Get this processor's hostname for registration with DNS.
+    
+    In Docker overlay networks, we use the container hostname (e.g., processor_1)
+    instead of IP addresses because Docker's internal DNS resolves hostnames
+    within the overlay network correctly.
+    """
     import socket
+    
+    # First, try to use the hostname directly (works best in Docker overlay networks)
+    hostname = socket.gethostname()
+    
+    # If hostname looks like a container name, use it
+    if hostname and not hostname.startswith("localhost"):
+        # Verify we can resolve this hostname
+        try:
+            socket.gethostbyname(hostname)
+            return hostname
+        except socket.gaierror:
+            pass  # Fall through to IP detection
+    
+    # Fallback: try to get IP address
     try:
-        # Get the IP address that would be used to reach DNS
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect((DNS_ALIAS, DNS_PORT))
         ip = s.getsockname()[0]
         s.close()
         return ip
     except Exception:
-        return socket.gethostbyname(socket.gethostname())
+        return socket.gethostbyname(hostname) if hostname else "127.0.0.1"
 
 
 async def _discover_dns_url() -> Optional[str]:

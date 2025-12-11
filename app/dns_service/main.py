@@ -34,6 +34,9 @@ HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", 5))  # 5 segundos
 SYNC_INTERVAL = int(os.getenv("SYNC_INTERVAL", 30))  # 30 segundos
 DISCOVERY_INTERVAL = int(os.getenv("DISCOVERY_INTERVAL", 15))  # Re-descubrir cada 15s
 
+# Timeout para considerar un servidor DNS como caído y eliminarlo del registro (en segundos)
+DNS_SERVER_TIMEOUT = int(os.getenv("DNS_SERVER_TIMEOUT", 30))  # 30 segundos sin respuesta = eliminar
+
 # ============================================================================
 # ESTADO DEL SERVIDOR
 # ============================================================================
@@ -111,6 +114,8 @@ class SyncData(BaseModel):
     cache: Dict[str, dict]
     timestamp: str
     source_id: str
+    api_servers: Optional[Dict[str, dict]] = None
+    processor_servers: Optional[Dict[str, dict]] = None
 
 
 class HealthResponse(BaseModel):
@@ -342,25 +347,67 @@ async def resolve_hostname(hostname: str, background_tasks: BackgroundTasks):
 
 @app.post("/sync")
 async def receive_sync(sync_data: SyncData):
-    """Recibe actualizaciones de sincronización desde el primario"""
-    logger.info(f"[{server_id}] Recibiendo sync desde {sync_data.source_id}. Entradas: {len(sync_data.cache)}")
+    """Recibe actualizaciones de sincronización desde otro DNS (primario u otro nodo)"""
+    logger.info(f"[{server_id}] Recibiendo sync desde {sync_data.source_id}")
     
+    # Sincronizar cache DNS
     for hostname, entry in sync_data.cache.items():
         dns_cache[hostname] = entry
+    
+    # Sincronizar api_servers (storage nodes)
+    if sync_data.api_servers:
+        async with api_servers_lock:
+            for sid, info in sync_data.api_servers.items():
+                # Solo actualizar si es más reciente o no existe
+                if sid not in api_servers:
+                    api_servers[sid] = info
+                    logger.debug(f"[{server_id}] Sync: añadido api_server {sid}")
+                else:
+                    # Comparar timestamps para mantener el más reciente
+                    existing_hb = api_servers[sid].get("last_heartbeat", "")
+                    incoming_hb = info.get("last_heartbeat", "")
+                    if incoming_hb > existing_hb:
+                        api_servers[sid] = info
+    
+    # Sincronizar processor_servers
+    if sync_data.processor_servers:
+        async with processor_servers_lock:
+            for pid, info in sync_data.processor_servers.items():
+                if pid not in processor_servers:
+                    processor_servers[pid] = info
+                    logger.debug(f"[{server_id}] Sync: añadido processor {pid}")
+                else:
+                    existing_hb = processor_servers[pid].get("last_heartbeat", "")
+                    incoming_hb = info.get("last_heartbeat", "")
+                    if incoming_hb > existing_hb:
+                        processor_servers[pid] = info
     
     sync_status["last_sync"] = datetime.now().isoformat()
     sync_status["sync_count"] += 1
     
-    logger.info(f"[{server_id}] Sync completada. Cache: {len(dns_cache)} entradas")
+    logger.info(f"[{server_id}] Sync completada. Cache: {len(dns_cache)}, API servers: {len(api_servers)}, Processors: {len(processor_servers)}")
     
-    return {"status": "synced", "entries": len(dns_cache), "receiver": server_id}
+    return {
+        "status": "synced", 
+        "entries": len(dns_cache),
+        "api_servers": len(api_servers),
+        "processors": len(processor_servers),
+        "receiver": server_id
+    }
 
 
 @app.get("/cache")
-def get_cache():
-    """Obtiene el estado del cache"""
+async def get_cache():
+    """Obtiene el estado completo del DNS (cache, api_servers, processor_servers)"""
+    async with api_servers_lock:
+        api_copy = dict(api_servers)
+    async with processor_servers_lock:
+        proc_copy = dict(processor_servers)
+    
     return {
         "cache": dns_cache,
+        "api_servers": api_copy,
+        "processor_servers": proc_copy,
         "timestamp": datetime.now().isoformat(),
         "server_id": server_id,
         "role": server_role
@@ -402,10 +449,11 @@ async def register_dns_server(request: RegisterRequest):
 # ============================================================================
 
 @app.post("/server/register")
-async def register_api_server(request: APIServerRegisterRequest):
+async def register_api_server(request: APIServerRegisterRequest, background_tasks: BackgroundTasks):
     """
     Registra un servidor API y le asigna un rol (PRIMARY o BACKUP).
     El primer servidor en registrarse es el PRIMARY.
+    El registro se propaga automáticamente a todos los otros DNS.
     """
     async with api_servers_lock:
         now = datetime.now().isoformat()
@@ -430,13 +478,22 @@ async def register_api_server(request: APIServerRegisterRequest):
             logger.info(f"[{server_id}] Servidor API {request.server_id} registrado como BACKUP (PRIMARY: {current_primary})")
         
         # Registrar servidor
-        api_servers[request.server_id] = {
+        server_info = {
             "ip": request.ip,
             "port": request.port,
             "role": assigned_role,
             "last_heartbeat": now,
             "registered_at": now
         }
+        api_servers[request.server_id] = server_info
+        
+        # Propagar a otros DNS en background
+        background_tasks.add_task(
+            propagate_service_registration, 
+            "api_server", 
+            request.server_id, 
+            server_info
+        )
         
         # Obtener info del PRIMARY actual para que los backups sepan a quién sincronizar
         primary_info = None
@@ -628,15 +685,16 @@ async def list_api_servers():
 # ============================================================================
 
 @app.post("/processor/register")
-async def register_processor(request: ProcessorRegisterRequest):
+async def register_processor(request: ProcessorRegisterRequest, background_tasks: BackgroundTasks):
     """
     Registra un Processor Node en el DNS.
     Los processors son stateless y todos tienen el mismo peso.
+    El registro se propaga automáticamente a todos los otros DNS.
     """
     async with processor_servers_lock:
         now = datetime.now().isoformat()
         
-        processor_servers[request.processor_id] = {
+        processor_info = {
             "ip": request.ip,
             "port": request.port,
             "last_heartbeat": now,
@@ -644,7 +702,17 @@ async def register_processor(request: ProcessorRegisterRequest):
             "healthy": True
         }
         
+        processor_servers[request.processor_id] = processor_info
+        
         logger.info(f"[{server_id}] Processor {request.processor_id} registrado ({request.ip}:{request.port})")
+        
+        # Propagar a otros DNS en background
+        background_tasks.add_task(
+            propagate_service_registration, 
+            "processor", 
+            request.processor_id, 
+            processor_info
+        )
         
         return {
             "status": "registered",
@@ -654,9 +722,10 @@ async def register_processor(request: ProcessorRegisterRequest):
 
 
 @app.post("/processor/heartbeat")
-async def processor_heartbeat(request: ProcessorHeartbeatRequest):
+async def processor_heartbeat(request: ProcessorHeartbeatRequest, background_tasks: BackgroundTasks):
     """
     Recibe heartbeat de un Processor para mantenerlo activo.
+    También propaga el heartbeat a otros DNS.
     """
     async with processor_servers_lock:
         if request.processor_id not in processor_servers:
@@ -668,6 +737,15 @@ async def processor_heartbeat(request: ProcessorHeartbeatRequest):
         now_iso = datetime.now().isoformat()
         processor_servers[request.processor_id]["last_heartbeat"] = now_iso
         processor_servers[request.processor_id]["healthy"] = True
+        
+        # Propagar heartbeat a otros DNS en background
+        processor_info = dict(processor_servers[request.processor_id])
+        background_tasks.add_task(
+            propagate_service_registration, 
+            "processor", 
+            request.processor_id, 
+            processor_info
+        )
         
         return {
             "status": "ok",
@@ -904,14 +982,65 @@ async def check_server_health(ip: str):
                 return True
                 
     except Exception as e:
-        # Marcar como no healthy
-        for sid, info in cluster_state.items():
+        # Marcar como no healthy pero mantener last_seen original para calcular timeout
+        for sid, info in list(cluster_state.items()):
             if info.get("ip") == ip:
                 cluster_state[sid]["healthy"] = False
+                logger.debug(f"[{server_id}] Servidor DNS {sid} ({ip}) no responde")
                 break
         return False
     
     return False
+
+
+async def cleanup_dead_dns_servers():
+    """
+    Elimina del registro los servidores DNS que han excedido el timeout.
+    Un servidor se considera muerto si no ha respondido en DNS_SERVER_TIMEOUT segundos.
+    """
+    global known_dns_ips
+    
+    now = datetime.now()
+    servers_to_remove = []
+    
+    for sid, info in list(cluster_state.items()):
+        # No eliminarnos a nosotros mismos
+        if sid == server_id:
+            continue
+        
+        # Solo considerar servidores marcados como no healthy
+        if info.get("healthy", True):
+            continue
+        
+        # Verificar tiempo desde última respuesta exitosa
+        last_seen_str = info.get("last_seen")
+        if not last_seen_str:
+            continue
+            
+        try:
+            last_seen = datetime.fromisoformat(last_seen_str)
+            elapsed = (now - last_seen).total_seconds()
+            
+            if elapsed > DNS_SERVER_TIMEOUT:
+                servers_to_remove.append((sid, info.get("ip")))
+                
+        except (ValueError, TypeError) as e:
+            logger.debug(f"[{server_id}] Error parseando last_seen de {sid}: {e}")
+    
+    # Eliminar servidores muertos
+    for sid, ip in servers_to_remove:
+        logger.warning(f"[{server_id}] Eliminando servidor DNS {sid} ({ip}) del registro - timeout excedido ({DNS_SERVER_TIMEOUT}s)")
+        
+        # Eliminar del cluster_state
+        if sid in cluster_state:
+            del cluster_state[sid]
+        
+        # Eliminar de known_dns_ips
+        if ip and ip in known_dns_ips:
+            known_dns_ips.discard(ip)
+    
+    if servers_to_remove:
+        logger.info(f"[{server_id}] Limpieza completada: {len(servers_to_remove)} servidor(es) DNS eliminado(s). Clúster actual: {list(cluster_state.keys())}")
 
 
 async def determine_role():
@@ -1006,6 +1135,48 @@ async def notify_promotion():
 # SINCRONIZACIÓN
 # ============================================================================
 
+async def propagate_service_registration(service_type: str, service_id: str, service_info: dict):
+    """
+    Propaga el registro de un servicio (processor o api_server) a todos los otros DNS.
+    Esto asegura que si un servicio se registra en un DNS, todos los demás lo conozcan inmediatamente.
+    """
+    logger.debug(f"[{server_id}] Propagando registro de {service_type}/{service_id} a otros DNS...")
+    
+    # Construir los datos de sync
+    sync_data = {
+        "cache": {},
+        "timestamp": datetime.now().isoformat(),
+        "source_id": server_id,
+        "api_servers": {},
+        "processor_servers": {}
+    }
+    
+    if service_type == "processor":
+        sync_data["processor_servers"] = {service_id: service_info}
+    elif service_type == "api_server":
+        sync_data["api_servers"] = {service_id: service_info}
+    
+    # Enviar a todos los otros DNS conocidos
+    for sid, info in cluster_state.items():
+        if sid == server_id:
+            continue
+            
+        if not info.get("healthy"):
+            continue
+            
+        url = info.get("url")
+        if not url:
+            continue
+            
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                response = await client.post(f"{url}/sync", json=sync_data)
+                if response.status_code == 200:
+                    logger.debug(f"[{server_id}] Registro de {service_type}/{service_id} propagado a {sid}")
+        except Exception as e:
+            logger.debug(f"[{server_id}] Error propagando registro a {sid}: {e}")
+
+
 async def propagate_to_backups(hostname: str, ip: str):
     """Propaga una resolución a los servidores de backup"""
     if server_role != "primary":
@@ -1039,7 +1210,7 @@ async def propagate_to_backups(hostname: str, ip: str):
 
 
 async def sync_from_primary():
-    """Sincroniza el cache completo desde el primario"""
+    """Sincroniza el estado completo desde el primario (cache, api_servers, processor_servers)"""
     global current_primary_url
     
     if server_role == "primary" or not current_primary_url:
@@ -1052,13 +1223,37 @@ async def sync_from_primary():
             response = await client.get(f"{current_primary_url}/cache")
             if response.status_code == 200:
                 data = response.json()
+                
+                # Sincronizar cache DNS
                 for hostname, entry in data.get("cache", {}).items():
                     dns_cache[hostname] = entry
+                
+                # Sincronizar api_servers (storage nodes)
+                async with api_servers_lock:
+                    for sid, info in data.get("api_servers", {}).items():
+                        if sid not in api_servers:
+                            api_servers[sid] = info
+                        else:
+                            existing_hb = api_servers[sid].get("last_heartbeat", "")
+                            incoming_hb = info.get("last_heartbeat", "")
+                            if incoming_hb > existing_hb:
+                                api_servers[sid] = info
+                
+                # Sincronizar processor_servers
+                async with processor_servers_lock:
+                    for pid, info in data.get("processor_servers", {}).items():
+                        if pid not in processor_servers:
+                            processor_servers[pid] = info
+                        else:
+                            existing_hb = processor_servers[pid].get("last_heartbeat", "")
+                            incoming_hb = info.get("last_heartbeat", "")
+                            if incoming_hb > existing_hb:
+                                processor_servers[pid] = info
                 
                 sync_status["last_sync"] = datetime.now().isoformat()
                 sync_status["sync_count"] += 1
                 
-                logger.info(f"[{server_id}] Sincronización completada. Cache: {len(dns_cache)} entradas")
+                logger.info(f"[{server_id}] Sincronización completada. Cache: {len(dns_cache)}, API servers: {len(api_servers)}, Processors: {len(processor_servers)}")
     except Exception as e:
         logger.error(f"[{server_id}] Error en sincronización: {e}")
 
@@ -1090,6 +1285,9 @@ async def health_check_loop():
                 ip = info.get("ip")
                 if ip:
                     await check_server_health(ip)
+            
+            # Limpiar servidores DNS que han excedido el timeout
+            await cleanup_dead_dns_servers()
             
             # Determinar mi rol basándome en el estado actual
             await determine_role()
@@ -1124,13 +1322,14 @@ async def startup_event():
     global my_ip, my_hostname, server_role, primary_since
     
     logger.info(f"[{server_id}] ========================================")
-    logger.info(f"[{server_id}] Iniciando DNS Service HA v2.1")
+    logger.info(f"[{server_id}] Iniciando DNS Service HA v2.2")
     logger.info(f"[{server_id}] Server ID: {server_id}")
     logger.info(f"[{server_id}] DNS Alias: {DNS_ALIAS}")
     logger.info(f"[{server_id}] Puerto: {dns_port}")
     logger.info(f"[{server_id}] Health Check Interval: {HEALTH_CHECK_INTERVAL}s")
     logger.info(f"[{server_id}] Discovery Interval: {DISCOVERY_INTERVAL}s")
     logger.info(f"[{server_id}] Sync Interval: {SYNC_INTERVAL}s")
+    logger.info(f"[{server_id}] DNS Server Timeout: {DNS_SERVER_TIMEOUT}s")
     logger.info(f"[{server_id}] ========================================")
     
     # Obtener mi IP

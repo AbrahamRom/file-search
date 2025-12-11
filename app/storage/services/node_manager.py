@@ -85,7 +85,29 @@ class NodeManager:
         self._on_become_backup = on_become_backup
     
     def _get_my_ip(self) -> Optional[str]:
-        """Get this container's IP address."""
+        """
+        Get this container's hostname or IP address.
+        
+        In Docker overlay networks, we use the container hostname (e.g., storage_1)
+        instead of IP addresses because:
+        1. Docker's internal DNS resolves hostnames within the overlay network
+        2. IP detection methods often return the wrong interface's IP
+        3. Hostnames are stable and consistent across container restarts
+        """
+        # First, try to use the hostname directly (works best in Docker overlay networks)
+        hostname = socket.gethostname()
+        
+        # If hostname looks like a container name (not a random hex), use it
+        # Docker container hostnames are typically the container name or container ID
+        if hostname and not hostname.startswith("localhost"):
+            # Verify we can resolve this hostname (it should work in Docker networks)
+            try:
+                socket.gethostbyname(hostname)
+                return hostname
+            except socket.gaierror:
+                pass  # Fall through to IP detection
+        
+        # Fallback: try to get IP address
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
@@ -94,9 +116,9 @@ class NodeManager:
             return ip
         except Exception:
             try:
-                return socket.gethostbyname(socket.gethostname())
+                return socket.gethostbyname(hostname)
             except Exception:
-                return None
+                return hostname if hostname else None
     
     def _discover_dns(self) -> Optional[str]:
         """
