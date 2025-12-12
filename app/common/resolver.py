@@ -120,6 +120,7 @@ class DNSClientHA:
     def _fetch_server_list(self, ip: str) -> bool:
         """
         Obtiene la lista completa de servidores DNS desde un servidor específico.
+        Valida que las IPs sean alcanzables antes de agregarlas.
         """
         try:
             url = f"http://{ip}:{self.dns_port}/dns-servers"
@@ -134,23 +135,49 @@ class DNSClientHA:
             if not all_servers:
                 return False
             
-            # Procesar lista de servidores
+            # Obtener IPs descubiertas localmente via Docker DNS (estas son las correctas)
+            local_ips = set(self._discover_via_alias())
+            
+            # Procesar lista de servidores, validando IPs
             new_servers = []
             primary_url = None
             
             for srv in all_servers:
+                srv_ip = srv.get("ip", "")
+                srv_url = srv.get("url", "")
+                
+                # Si la IP del servidor está en las IPs descubiertas localmente, es válida
+                # Si no está, podría ser una IP de otra red (bridge vs overlay)
+                is_locally_reachable = srv_ip in local_ips
+                
+                # Validar que la IP es alcanzable con un check rápido
+                if not is_locally_reachable and srv_ip:
+                    # Intentar un health check rápido
+                    try:
+                        check_url = f"http://{srv_ip}:{self.dns_port}/health"
+                        check_resp = requests.get(check_url, timeout=1.0)
+                        is_locally_reachable = check_resp.status_code == 200
+                    except Exception:
+                        logger.debug(f"[DNSClientHA] IP {srv_ip} no alcanzable, ignorando")
+                        is_locally_reachable = False
+                
                 server_entry = {
-                    "ip": srv.get("ip", ""),
-                    "url": srv.get("url", ""),
+                    "ip": srv_ip,
+                    "url": srv_url,
                     "server_id": srv.get("server_id", ""),
                     "role": srv.get("role", "unknown"),
-                    "healthy": srv.get("healthy", True),
+                    "healthy": srv.get("healthy", True) and is_locally_reachable,
                     "primary_since": srv.get("primary_since")
                 }
-                new_servers.append(server_entry)
                 
-                if srv.get("role") == "primary":
-                    primary_url = srv.get("url")
+                # Solo agregar si es alcanzable o si es el mismo servidor que consultamos
+                if is_locally_reachable or srv_ip == ip:
+                    new_servers.append(server_entry)
+                else:
+                    logger.warning(f"[DNSClientHA] Ignorando servidor {srv.get('server_id')} con IP no alcanzable: {srv_ip}")
+                
+                if srv.get("role") == "primary" and is_locally_reachable:
+                    primary_url = srv_url
             
             # Ordenar: primario primero, luego por primary_since (más antiguo = más prioridad)
             new_servers.sort(key=lambda x: (
@@ -165,7 +192,7 @@ class DNSClientHA:
             
             logger.info(f"[DNSClientHA] Lista actualizada: {len(new_servers)} servidores")
             for srv in new_servers:
-                logger.debug(f"  - {srv['server_id']} ({srv['ip']}): {srv['role']}")
+                logger.debug(f"  - {srv['server_id']} ({srv['ip']}): {srv['role']} healthy={srv['healthy']}")
             
             return True
             

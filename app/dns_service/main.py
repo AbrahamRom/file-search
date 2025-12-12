@@ -876,19 +876,44 @@ async def receive_new_primary_notification(data: dict):
 # ============================================================================
 
 def get_my_ip() -> Optional[str]:
-    """Obtiene la IP de este contenedor"""
+    """
+    Obtiene la IP de este contenedor EN LA RED OVERLAY de Docker.
+    
+    En redes overlay, la IP que nos interesa es la que otros contenedores
+    pueden usar para contactarnos. Usamos el hostname del contenedor
+    que Docker resuelve correctamente dentro de la red overlay.
+    """
     try:
-        # Crear un socket y conectar a una IP externa para obtener nuestra IP
+        # Primero intentamos resolver nuestro propio hostname
+        # Docker DNS resolverá esto a nuestra IP en la red overlay
+        hostname = socket.gethostname()
+        ip = socket.gethostbyname(hostname)
+        logger.debug(f"[{server_id}] IP obtenida via hostname '{hostname}': {ip}")
+        return ip
+    except socket.gaierror:
+        pass
+    
+    try:
+        # Fallback: intentar resolver el server_id directamente
+        # En Docker con network-alias, esto debería funcionar
+        ip = socket.gethostbyname(server_id)
+        logger.debug(f"[{server_id}] IP obtenida via server_id: {ip}")
+        return ip
+    except socket.gaierror:
+        pass
+    
+    try:
+        # Último fallback: técnica de socket UDP (menos confiable en overlay)
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
+        # Conectamos al DNS alias en lugar de una IP externa
+        s.connect((DNS_ALIAS, dns_port))
         ip = s.getsockname()[0]
         s.close()
+        logger.debug(f"[{server_id}] IP obtenida via socket UDP: {ip}")
         return ip
-    except Exception:
-        try:
-            return socket.gethostbyname(socket.gethostname())
-        except Exception:
-            return None
+    except Exception as e:
+        logger.warning(f"[{server_id}] No se pudo obtener IP: {e}")
+        return None
 
 
 async def discover_via_dns_alias():
