@@ -12,6 +12,14 @@ CREATE TABLE IF NOT EXISTS files (
     -- Shard identifier for future horizontal partitioning
     -- NULL means this storage node holds all data (no sharding)
     shard_id TEXT DEFAULT NULL,
+    -- Content hash for conflict detection (SHA256)
+    content_hash TEXT DEFAULT NULL,
+    -- Version counter per file_path (monotonic)
+    version INTEGER DEFAULT 1,
+    -- Origin node that wrote this version
+    origin_node TEXT DEFAULT NULL,
+    -- Primary epoch when written (for fencing)
+    write_epoch INTEGER DEFAULT NULL,
     -- Timestamp when record was created/updated
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP

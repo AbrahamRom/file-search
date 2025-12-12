@@ -30,7 +30,7 @@ DNS_ALIAS = os.getenv("DNS_ALIAS", "dns")
 dns_port = int(os.getenv("DNS_PORT", 5353))
 
 # Intervalos de configuración
-HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", 5))  # 5 segundos
+HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", 10))  # 10 segundos
 SYNC_INTERVAL = int(os.getenv("SYNC_INTERVAL", 30))  # 30 segundos
 DISCOVERY_INTERVAL = int(os.getenv("DISCOVERY_INTERVAL", 15))  # Re-descubrir cada 15s
 
@@ -78,18 +78,24 @@ start_time = time.time()
 # ============================================================================
 
 # Estado de los servidores API registrados
-# {server_id: {ip, port, role, last_heartbeat, registered_at}}
+# {server_id: {ip, port, role, last_heartbeat, registered_at, primary_epoch, lease_expires_at}}
 api_servers: Dict[str, dict] = {}
+
+# Epoch global para PRIMARY (monotónico)
+primary_epoch: int = 0
+
+# Duración del lease en segundos
+LEASE_DURATION = int(os.getenv("LEASE_DURATION", 30))
 
 # Estado de los PROCESSOR nodes registrados
 # {processor_id: {ip, port, last_heartbeat, registered_at, healthy}}
 processor_servers: Dict[str, dict] = {}
 
 # Timeout para considerar un servidor API como caído (en segundos)
-API_SERVER_TIMEOUT = int(os.getenv("API_SERVER_TIMEOUT", 15))
+API_SERVER_TIMEOUT = int(os.getenv("API_SERVER_TIMEOUT", 25))
 
 # Timeout para processors (en segundos)
-PROCESSOR_TIMEOUT = int(os.getenv("PROCESSOR_TIMEOUT", 15))
+PROCESSOR_TIMEOUT = int(os.getenv("PROCESSOR_TIMEOUT", 25))
 
 # Lock para operaciones atómicas en api_servers
 api_servers_lock = asyncio.Lock()
@@ -198,6 +204,8 @@ class APIServerResolveResponse(BaseModel):
     port: int
     role: str
     url: str
+    primary_epoch: Optional[int] = None
+    lease_expires_at: Optional[str] = None
 
 
 # ============================================================================
@@ -469,12 +477,16 @@ async def register_api_server(request: APIServerRegisterRequest, background_task
                     current_primary = sid
                     break
         
-        # Asignar rol
+        # Asignar rol y epoch/lease
+        global primary_epoch
         if current_primary is None:
             assigned_role = "PRIMARY"
-            logger.info(f"[{server_id}] Servidor API {request.server_id} registrado como PRIMARY")
+            primary_epoch += 1
+            lease_expires = datetime.now().timestamp() + LEASE_DURATION
+            logger.info(f"[{server_id}] Servidor API {request.server_id} registrado como PRIMARY (epoch={primary_epoch})")
         else:
             assigned_role = "BACKUP"
+            lease_expires = None
             logger.info(f"[{server_id}] Servidor API {request.server_id} registrado como BACKUP (PRIMARY: {current_primary})")
         
         # Registrar servidor
@@ -483,7 +495,9 @@ async def register_api_server(request: APIServerRegisterRequest, background_task
             "port": request.port,
             "role": assigned_role,
             "last_heartbeat": now,
-            "registered_at": now
+            "registered_at": now,
+            "primary_epoch": primary_epoch if assigned_role == "PRIMARY" else None,
+            "lease_expires_at": datetime.fromtimestamp(lease_expires).isoformat() if lease_expires else None
         }
         api_servers[request.server_id] = server_info
         
@@ -544,6 +558,13 @@ async def api_server_heartbeat(request: APIServerHeartbeatRequest, background_ta
         api_servers[request.server_id]["last_heartbeat"] = now_iso
         
         assigned_role = api_servers[request.server_id]["role"]
+        
+        # Renovar lease si es PRIMARY
+        global primary_epoch
+        if assigned_role == "PRIMARY":
+            lease_expires = now.timestamp() + LEASE_DURATION
+            api_servers[request.server_id]["lease_expires_at"] = datetime.fromtimestamp(lease_expires).isoformat()
+        
         primary_info = None
         
         affected_service_ids: set[str] = {request.server_id}
@@ -575,9 +596,13 @@ async def api_server_heartbeat(request: APIServerHeartbeatRequest, background_ta
                     affected_service_ids.add(current_primary)
                 
                 if oldest_backup:
-                    # Promover el backup más antiguo
+                    # Promover el backup más antiguo con nuevo epoch
+                    primary_epoch += 1
+                    lease_expires = now.timestamp() + LEASE_DURATION
                     api_servers[oldest_backup]["role"] = "PRIMARY"
-                    logger.warning(f"[{server_id}] *** FAILOVER: Promoviendo {oldest_backup} a PRIMARY ***")
+                    api_servers[oldest_backup]["primary_epoch"] = primary_epoch
+                    api_servers[oldest_backup]["lease_expires_at"] = datetime.fromtimestamp(lease_expires).isoformat()
+                    logger.warning(f"[{server_id}] *** FAILOVER: Promoviendo {oldest_backup} a PRIMARY (epoch={primary_epoch}) ***")
 
                     affected_service_ids.add(oldest_backup)
                     
@@ -641,7 +666,9 @@ async def resolve_api_server():
                         ip=info["ip"],
                         port=info["port"],
                         role="PRIMARY",
-                        url=f"http://{info['ip']}:{info['port']}"
+                        url=f"http://{info['ip']}:{info['port']}",
+                        primary_epoch=info.get("primary_epoch"),
+                        lease_expires_at=info.get("lease_expires_at")
                     )
         
         # No hay PRIMARY activo, buscar un BACKUP vivo
@@ -650,16 +677,23 @@ async def resolve_api_server():
             elapsed = (now - last_hb).total_seconds()
             
             if elapsed < API_SERVER_TIMEOUT:
-                # Promover este BACKUP a PRIMARY
+                # Promover este BACKUP a PRIMARY con nuevo epoch
+                global primary_epoch
+                primary_epoch += 1
+                lease_expires = now.timestamp() + LEASE_DURATION
                 api_servers[sid]["role"] = "PRIMARY"
-                logger.warning(f"[{server_id}] No hay PRIMARY. Promoviendo {sid} a PRIMARY en resolución")
+                api_servers[sid]["primary_epoch"] = primary_epoch
+                api_servers[sid]["lease_expires_at"] = datetime.fromtimestamp(lease_expires).isoformat()
+                logger.warning(f"[{server_id}] No hay PRIMARY. Promoviendo {sid} a PRIMARY en resolución (epoch={primary_epoch})")
                 
                 return APIServerResolveResponse(
                     server_id=sid,
                     ip=info["ip"],
                     port=info["port"],
                     role="PRIMARY",
-                    url=f"http://{info['ip']}:{info['port']}"
+                    url=f"http://{info['ip']}:{info['port']}",
+                    primary_epoch=primary_epoch,
+                    lease_expires_at=api_servers[sid]["lease_expires_at"]
                 )
         
         logger.error(f"[{server_id}] No hay servidores API disponibles")

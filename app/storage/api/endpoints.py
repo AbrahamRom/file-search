@@ -17,6 +17,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import hashlib
 from datetime import datetime, timezone
 from typing import List, Optional
 from pathlib import Path
@@ -52,6 +53,7 @@ from ..db.crud import (
 from ..db.db import init_db, DB_PATH
 from ..services.scanner import sync, FILES_ROOT, compute_file_id
 from ..services import file_handler
+from ..services.node_manager import get_node_manager
 
 logger = logging.getLogger(__name__)
 access_logger = logging.getLogger("storage.access")
@@ -299,8 +301,39 @@ async def upload_file_endpoint(
     """
     Upload a file to this Storage Node.
     The file is saved to disk and registered in the database.
+    
+    FENCING: Only accepts writes if node is PRIMARY with valid lease.
     """
+    # Fencing: validar rol y lease
+    node_mgr = get_node_manager()
+    if not node_mgr.is_primary:
+        logger.warning(f"[FENCING] Upload rejected: not PRIMARY (role={node_mgr.role})")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "not_primary",
+                "message": "This node is not PRIMARY",
+                "current_role": node_mgr.role,
+                "primary_url": node_mgr.primary_url
+            }
+        )
+    
+    if not node_mgr.has_valid_lease():
+        logger.warning(f"[FENCING] Upload rejected: lease expired (epoch={node_mgr.primary_epoch})")
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "lease_expired",
+                "message": "PRIMARY lease has expired",
+                "epoch": node_mgr.primary_epoch
+            }
+        )
+    
     try:
+        # Read content first for hash calculation
+        content = await file.read()
+        content_hash = hashlib.sha256(content).hexdigest()
+        
         # Create target directory
         target_dir = FILES_ROOT
         if folder:
@@ -314,17 +347,17 @@ async def upload_file_endpoint(
         # Save file
         file_path = target_dir / file.filename
         with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+            buffer.write(content)
         
         # Get file metadata
         stat = file_path.stat()
-        last_modified = datetime.fromtimestamp(stat.st_mtime)
+        last_modified = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
         
         # Compute file ID
         relative_path = file_path.relative_to(FILES_ROOT).as_posix()
         file_id = compute_file_id(relative_path)
         
-        # Register in database
+        # Register in database with hash and epoch
         upsert_file(
             file_id=file_id,
             name=file.filename,
@@ -332,9 +365,12 @@ async def upload_file_endpoint(
             size=stat.st_size,
             last_modified=last_modified,
             shard_id=shard_id,
+            content_hash=content_hash,
+            origin_node=STORAGE_ID,
+            write_epoch=node_mgr.primary_epoch,
         )
         
-        logger.info("File %s uploaded successfully", file.filename)
+        logger.info("File %s uploaded successfully (hash=%s, epoch=%s)", file.filename, content_hash[:8], node_mgr.primary_epoch)
         
         client_host = request.client.host if request.client else "-"
         access_logger.info(
@@ -349,9 +385,12 @@ async def upload_file_endpoint(
             "file_id": file_id,
             "filename": file.filename,
             "size": stat.st_size,
+            "content_hash": content_hash,
             "storage_id": STORAGE_ID,
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error uploading file: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Upload error: {str(e)}")
@@ -482,6 +521,9 @@ async def replicate_file_from_peer(
     relative_path: str = Form(...),
     last_modified: str = Form(...),
     shard_id: str = Form(None),
+    content_hash: str = Form(None),
+    origin_node: str = Form(None),
+    write_epoch: int = Form(None),
 ):
     """
     Recibe una versión de un archivo desde otro Storage.
@@ -494,11 +536,20 @@ async def replicate_file_from_peer(
     modified_dt = _parse_iso_datetime(last_modified)
 
     try:
+        # Read content for hash verification/calculation
+        content = await file.read()
+        if content_hash:
+            # Verify hash if provided
+            actual_hash = hashlib.sha256(content).hexdigest()
+            if actual_hash != content_hash:
+                logger.warning(f"[SYNC] Hash mismatch for {relative_path}: expected {content_hash[:8]}, got {actual_hash[:8]}")
+        else:
+            content_hash = hashlib.sha256(content).hexdigest()
+        
         full_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Escritura atómica: escribir a tmp y mover.
         with tempfile.NamedTemporaryFile(delete=False, dir=str(full_path.parent)) as tmp:
-            content = await file.read()
             tmp.write(content)
             tmp_path = tmp.name
 
@@ -518,13 +569,17 @@ async def replicate_file_from_peer(
             size=size,
             last_modified=modified_dt,
             shard_id=shard_id,
+            content_hash=content_hash,
+            origin_node=origin_node or "unknown",
+            write_epoch=write_epoch,
         )
 
         logger.info(
-            "[SYNC] Replicated file from %s: %s (%d bytes)",
+            "[SYNC] Replicated file from %s: %s (%d bytes, hash=%s)",
             client_host,
             relative_path,
             size,
+            content_hash[:8] if content_hash else "none",
         )
 
         return {
@@ -532,6 +587,7 @@ async def replicate_file_from_peer(
             "relative_path": relative_path,
             "size": size,
             "last_modified": modified_dt.isoformat(),
+            "content_hash": content_hash,
             "storage_id": STORAGE_ID,
         }
     except HTTPException:

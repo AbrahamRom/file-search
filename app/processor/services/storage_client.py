@@ -159,6 +159,25 @@ class StorageClient:
             try:
                 response = await self._http_client.request(method, url, **kwargs)
                 
+                # Handle fencing errors (409 Conflict = lease expired, 503 = not primary)
+                if response.status_code in (409, 503):
+                    try:
+                        error_detail = response.json()
+                        error_type = error_detail.get("detail", {}).get("error") if isinstance(error_detail.get("detail"), dict) else None
+                        
+                        if error_type in ("lease_expired", "not_primary"):
+                            logger.warning(
+                                f"[FENCING] Storage {storage_id} rejected write: {error_type}. "
+                                f"Will invalidate DNS cache and retry with current PRIMARY."
+                            )
+                            raise StorageRequestError(
+                                f"Fencing error: {error_type}",
+                                storage_id,
+                                response.status_code,
+                            )
+                    except (ValueError, KeyError):
+                        pass  # Not a fencing error, treat as normal error
+                
                 if response.status_code >= 500:
                     raise StorageRequestError(
                         f"Server error: {response.status_code}",

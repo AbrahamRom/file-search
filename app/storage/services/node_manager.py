@@ -19,7 +19,7 @@ DNS_ALIAS = os.getenv("DNS_ALIAS", "dns")
 DNS_PORT = int(os.getenv("DNS_SERVICE_PORT", 5353))
 SERVER_ID = os.getenv("STORAGE_ID", os.getenv("SERVER_ID", f"storage_{socket.gethostname()}"))
 SERVER_PORT = int(os.getenv("STORAGE_PORT", os.getenv("SERVER_PORT", 8000)))
-HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", 5))
+HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", 10))
 DNS_RETRY_INTERVAL = int(os.getenv("DNS_RETRY_INTERVAL", 3))
 DNS_MAX_RETRIES = int(os.getenv("DNS_MAX_RETRIES", 10))
 
@@ -44,6 +44,8 @@ class NodeManager:
         self._dns_url: Optional[str] = None
         self._registered: bool = False
         self._running: bool = False
+        self._primary_epoch: Optional[int] = None
+        self._lease_expires_at: Optional[float] = None
         
         # Callbacks for role changes
         self._on_become_primary: Optional[Callable] = None
@@ -74,6 +76,17 @@ class NodeManager:
         if self._primary_info:
             return self._primary_info.get("url")
         return None
+    
+    @property
+    def primary_epoch(self) -> Optional[int]:
+        """Current primary epoch."""
+        return self._primary_epoch
+    
+    def has_valid_lease(self) -> bool:
+        """Check if current PRIMARY lease is still valid."""
+        if not self.is_primary or self._lease_expires_at is None:
+            return False
+        return time.time() < self._lease_expires_at
     
     def set_callbacks(
         self, 

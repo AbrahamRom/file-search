@@ -16,6 +16,10 @@ def upsert_file(
     size: int,
     last_modified,
     shard_id: Optional[str] = None,
+    content_hash: Optional[str] = None,
+    version: Optional[int] = None,
+    origin_node: Optional[str] = None,
+    write_epoch: Optional[int] = None,
 ) -> None:
     """
     Insert or update a file record in the files table.
@@ -28,25 +32,41 @@ def upsert_file(
         size: File size in bytes
         last_modified: Last modification timestamp
         shard_id: Optional shard identifier for future sharding support
+        content_hash: SHA256 hash of content for conflict detection
+        version: Version counter (auto-increments if not provided)
+        origin_node: Node that wrote this version
+        write_epoch: Primary epoch when written (for fencing)
     """
     # Normalize last_modified to ISO string if it's a datetime-like object
     if hasattr(last_modified, "isoformat"):
         last_modified = last_modified.isoformat()
 
+    # Get current version if updating
+    if version is None:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT version FROM files WHERE file_id = ?", (file_id,))
+            row = cur.fetchone()
+            version = (row["version"] + 1) if row else 1
+
     sql = """
-    INSERT INTO files (file_id, name, path, size, last_modified, shard_id)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO files (file_id, name, path, size, last_modified, shard_id, content_hash, version, origin_node, write_epoch)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(file_id) DO UPDATE SET
         name = excluded.name,
         path = excluded.path,
         size = excluded.size,
         last_modified = excluded.last_modified,
-        shard_id = excluded.shard_id
+        shard_id = excluded.shard_id,
+        content_hash = excluded.content_hash,
+        version = excluded.version,
+        origin_node = excluded.origin_node,
+        write_epoch = excluded.write_epoch
     """
 
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute(sql, (file_id, name, path, size, last_modified, shard_id))
+        cur.execute(sql, (file_id, name, path, size, last_modified, shard_id, content_hash, version, origin_node, write_epoch))
 
 
 def delete_file(*, file_id: str) -> bool:
@@ -72,7 +92,7 @@ def get_file(file_id: str) -> Optional[dict]:
         Dictionary with file metadata or None if not found.
     """
     sql = """
-    SELECT file_id, name, path, size, last_modified, shard_id
+    SELECT file_id, name, path, size, last_modified, shard_id, content_hash, version, origin_node, write_epoch
     FROM files
     WHERE file_id = ?
     """
@@ -106,7 +126,7 @@ def list_files(*, shard_id: Optional[str] = None) -> List[dict]:
     """
     if shard_id:
         sql = """
-        SELECT file_id, name, path, size, last_modified, shard_id
+        SELECT file_id, name, path, size, last_modified, shard_id, content_hash, version, origin_node, write_epoch
         FROM files
         WHERE shard_id = ?
         ORDER BY name ASC
@@ -114,7 +134,7 @@ def list_files(*, shard_id: Optional[str] = None) -> List[dict]:
         params = (shard_id,)
     else:
         sql = """
-        SELECT file_id, name, path, size, last_modified, shard_id
+        SELECT file_id, name, path, size, last_modified, shard_id, content_hash, version, origin_node, write_epoch
         FROM files
         ORDER BY name ASC
         """
@@ -147,7 +167,7 @@ def search_files(
     
     if shard_id:
         sql = """
-        SELECT file_id, name, path, size, last_modified, shard_id
+        SELECT file_id, name, path, size, last_modified, shard_id, content_hash, version, origin_node, write_epoch
         FROM files
         WHERE name LIKE ? AND shard_id = ?
         ORDER BY name ASC
@@ -156,7 +176,7 @@ def search_files(
         params = (like_query, shard_id, limit, offset)
     else:
         sql = """
-        SELECT file_id, name, path, size, last_modified, shard_id
+        SELECT file_id, name, path, size, last_modified, shard_id, content_hash, version, origin_node, write_epoch
         FROM files
         WHERE name LIKE ?
         ORDER BY name ASC

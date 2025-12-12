@@ -9,6 +9,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import hashlib
 from pathlib import Path
 from typing import Optional, Dict
 from datetime import datetime, timezone
@@ -157,10 +158,12 @@ class SyncService:
                 logger.debug(f"[SyncService] Remote files: {len(remote_files)}")
                 
                 # Compare with local files
+                conflicted = 0
                 for remote_file in remote_files:
                     relative_path = remote_file["relative_path"]
                     remote_size = remote_file["size"]
                     remote_mtime = _parse_remote_mtime(remote_file.get("last_modified"))
+                    remote_hash = remote_file.get("content_hash")
                     
                     local_path = FILES_ROOT / relative_path
 
@@ -172,8 +175,35 @@ class SyncService:
                         stat = local_path.stat()
                         local_mtime = stat.st_mtime
                         local_size = stat.st_size
+                        
+                        # Calculate local hash if remote has hash
+                        local_hash = None
+                        if remote_hash and local_path.is_file():
+                            try:
+                                with open(local_path, "rb") as f:
+                                    local_hash = hashlib.sha256(f.read()).hexdigest()
+                            except Exception as e:
+                                logger.warning(f"[SyncService] Error calculating hash for {relative_path}: {e}")
 
-                        if remote_mtime is None:
+                        # Conflict detection: same mtime but different hash
+                        if (remote_hash and local_hash and 
+                            remote_hash != local_hash and 
+                            abs(remote_mtime - local_mtime) <= tolerance):
+                            # Conflict: preserve local as .conflict and download remote
+                            try:
+                                conflict_name = f"{local_path.stem}.conflict.{local_hash[:8]}{local_path.suffix}"
+                                conflict_path = local_path.parent / conflict_name
+                                shutil.copy2(local_path, conflict_path)
+                                logger.warning(
+                                    f"[CONFLICT] Detected divergent content for {relative_path}. "
+                                    f"Preserved local as {conflict_name}, will download PRIMARY version."
+                                )
+                                conflicted += 1
+                                action = "download"
+                            except Exception as e:
+                                logger.error(f"[CONFLICT] Error preserving conflict copy: {e}")
+                                action = "skip"
+                        elif remote_mtime is None:
                             # Fallback: comportamiento previo por tamaño
                             action = "download" if local_size != remote_size else "skip"
                         else:
@@ -248,8 +278,8 @@ class SyncService:
                             errors += 1
                             logger.error(f"[SyncService] Error pushing {relative_path}: {e}")
             
-            if downloaded > 0:
-                logger.info(f"[SyncService] File sync completed: {downloaded} downloaded, {pushed} pushed, {errors} errors")
+            if downloaded > 0 or pushed > 0 or conflicted > 0:
+                logger.info(f"[SyncService] File sync completed: {downloaded} downloaded, {pushed} pushed, {conflicted} conflicts, {errors} errors")
             
         except httpx.TimeoutException:
             logger.error("[SyncService] Timeout syncing files")
@@ -258,7 +288,7 @@ class SyncService:
             logger.error(f"[SyncService] Error syncing files: {e}")
             errors += 1
         
-        return {"downloaded": downloaded, "pushed": pushed, "errors": errors}
+        return {"downloaded": downloaded, "pushed": pushed, "conflicted": conflicted, "errors": errors}
     
     async def full_sync(self) -> bool:
         """
