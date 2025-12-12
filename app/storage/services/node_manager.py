@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import socket
+import time
 from typing import Optional, Dict, Callable
 from datetime import datetime
 
@@ -223,6 +224,22 @@ class NodeManager:
                     self._primary_info = data.get("primary_info")
                     self._registered = True
                     
+                    # Procesar epoch y lease si somos PRIMARY
+                    if self._role == "PRIMARY":
+                        self._primary_epoch = data.get("primary_epoch")
+                        lease_expires_str = data.get("lease_expires_at")
+                        if lease_expires_str:
+                            try:
+                                lease_dt = datetime.fromisoformat(lease_expires_str)
+                                self._lease_expires_at = lease_dt.timestamp()
+                                logger.info(f"[NodeManager] Lease expires at: {lease_expires_str}")
+                            except Exception as e:
+                                logger.warning(f"[NodeManager] Could not parse lease_expires_at: {e}")
+                    else:
+                        # Si somos BACKUP, limpiar lease
+                        self._primary_epoch = None
+                        self._lease_expires_at = None
+                    
                     logger.info(f"[NodeManager] *** REGISTERED as {self._role} ***")
                     logger.info(f"[NodeManager] Server ID: {self.server_id}, IP: {self._my_ip}")
                     
@@ -270,6 +287,26 @@ class NodeManager:
                         self._role = new_role
                         logger.warning(f"[NodeManager] *** ROLE CHANGE: {old_role} -> {new_role} ***")
                         self._notify_role_change(old_role)
+                    
+                    # Actualizar epoch y lease si somos PRIMARY
+                    if self._role == "PRIMARY":
+                        # Obtener epoch y lease de la respuesta del heartbeat
+                        new_epoch = data.get("primary_epoch")
+                        if new_epoch is not None:
+                            self._primary_epoch = new_epoch
+                        
+                        lease_expires_str = data.get("lease_expires_at")
+                        if lease_expires_str:
+                            try:
+                                lease_dt = datetime.fromisoformat(lease_expires_str)
+                                self._lease_expires_at = lease_dt.timestamp()
+                                logger.debug(f"[NodeManager] Lease renewed: {lease_expires_str}")
+                            except Exception as e:
+                                logger.warning(f"[NodeManager] Could not parse lease_expires_at: {e}")
+                    else:
+                        # Si somos BACKUP, limpiar lease
+                        self._primary_epoch = None
+                        self._lease_expires_at = None
                     
                     # Update PRIMARY info
                     if new_primary_info != self._primary_info:

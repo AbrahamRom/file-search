@@ -520,11 +520,17 @@ async def register_api_server(request: APIServerRegisterRequest, background_task
                 "url": f"http://{p['ip']}:{p['port']}"
             }
         
+        # Incluir epoch y lease en la respuesta para PRIMARY
+        response_epoch = server_info.get("primary_epoch") if assigned_role == "PRIMARY" else None
+        response_lease = server_info.get("lease_expires_at") if assigned_role == "PRIMARY" else None
+        
         return {
             "status": "registered",
             "assigned_role": assigned_role,
             "server_id": request.server_id,
             "primary_info": primary_info,
+            "primary_epoch": response_epoch,
+            "lease_expires_at": response_lease,
             "total_servers": len(api_servers)
         }
 
@@ -636,10 +642,17 @@ async def api_server_heartbeat(request: APIServerHeartbeatRequest, background_ta
                     server_info,
                 )
         
+        # Obtener epoch y lease del servidor actual para incluirlo en la respuesta
+        current_server_info = api_servers.get(request.server_id, {})
+        response_epoch = current_server_info.get("primary_epoch") if assigned_role == "PRIMARY" else None
+        response_lease = current_server_info.get("lease_expires_at") if assigned_role == "PRIMARY" else None
+        
         return {
             "status": "ok",
             "assigned_role": assigned_role,
             "primary_info": primary_info,
+            "primary_epoch": response_epoch,
+            "lease_expires_at": response_lease,
             "timestamp": now_iso
         }
 

@@ -541,21 +541,72 @@ class DNSClientHA:
         
         return None
     
-    def invalidate_storage_cache(self) -> None:
+    def invalidate_storage_cache(self, failed_storage_id: Optional[str] = None) -> None:
         """
         Invalida el cache del Storage Node.
         
         Llamar cuando el Storage Node actual falla (circuit breaker abre).
         La siguiente llamada a resolve_storage_server() consultará al DNS
         para obtener un nuevo Storage Node (posiblemente después de failover).
+        
+        Args:
+            failed_storage_id: ID del storage que falló (para logging)
         """
         with self._lock:
             if "__storage_server__" in self._cache:
                 old = self._cache["__storage_server__"]
+                old_id = old['data']['server_id']
                 logger.info(
-                    f"[DNSClientHA] Invalidando cache de Storage: {old['data']['server_id']}"
+                    f"[DNSClientHA] Invalidando cache de Storage: {old_id}"
                 )
                 del self._cache["__storage_server__"]
+                
+                # Si el storage que falló es el mismo que teníamos en caché,
+                # también forzar refresh de lista de DNS para buscar en otras particiones
+                if failed_storage_id and failed_storage_id == old_id:
+                    logger.info("[DNSClientHA] Forzando refresh de servidores DNS para buscar otras particiones")
+                    self._last_server_refresh = 0  # Forzar refresh inmediato
+    
+    def resolve_storage_from_all_dns(self, exclude_storage_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Intenta resolver Storage consultando TODOS los servidores DNS conocidos.
+        
+        Útil en casos de split-brain donde diferentes DNS pueden tener
+        diferentes views del PRIMARY.
+        
+        Args:
+            exclude_storage_id: Excluir este storage ID de los resultados
+            
+        Returns:
+            Dict con info del Storage o None
+        """
+        # Primero refrescar lista de DNS (podría descubrir nuevos)
+        self._refresh_server_list()
+        
+        results = []
+        
+        with self._lock:
+            servers_copy = list(self._dns_servers)
+        
+        # Consultar TODOS los DNS (no solo los healthy)
+        for server in servers_copy:
+            url = server.get("url")
+            if not url:
+                continue
+            
+            result = self._try_resolve_storage(url)
+            if result:
+                # Si debemos excluir cierto storage, continuar buscando
+                if exclude_storage_id and result.get("server_id") == exclude_storage_id:
+                    logger.info(f"[DNSClientHA] DNS {url} reportó {exclude_storage_id}, buscando alternativa...")
+                    continue
+                
+                # Encontramos un storage diferente o válido
+                logger.info(f"[DNSClientHA] Encontrado Storage alternativo: {result['server_id']} via {url}")
+                return result
+        
+        logger.warning(f"[DNSClientHA] No se encontró Storage alternativo (excluido: {exclude_storage_id})")
+        return None
     
     def get_storage_cache_status(self) -> Dict[str, Any]:
         """Retorna el estado del cache de Storage Node."""

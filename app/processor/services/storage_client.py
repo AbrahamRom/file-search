@@ -118,17 +118,26 @@ class StorageClient:
             dns_port = int(os.getenv("DNS_SERVICE_PORT", 5353))
             self.dns_client = DNSClientHA(dns_alias=dns_alias, dns_port=dns_port)
     
-    def _get_storage_info(self, force_refresh: bool = False) -> tuple[str, str]:
+    def _get_storage_info(self, force_refresh: bool = False, exclude_storage_id: Optional[str] = None) -> tuple[str, str]:
         """
         Get current Storage Node URL from DNS.
+        
+        Args:
+            force_refresh: Force DNS cache invalidation
+            exclude_storage_id: Exclude this storage ID and search for alternatives
         
         Returns:
             Tuple of (storage_url, storage_id)
         """
         if force_refresh:
-            self.dns_client.invalidate_storage_cache()
+            self.dns_client.invalidate_storage_cache(self._current_storage_id)
         
-        storage_info = self.dns_client.resolve_storage_server()
+        # Si hay un storage a excluir (ej: devolvió lease_expired), buscar alternativa
+        if exclude_storage_id:
+            storage_info = self.dns_client.resolve_storage_from_all_dns(exclude_storage_id=exclude_storage_id)
+        else:
+            storage_info = self.dns_client.resolve_storage_server()
+        
         if not storage_info:
             raise StorageUnavailableError("No storage nodes available from DNS")
         
@@ -209,28 +218,33 @@ class StorageClient:
            a. Invalidate DNS cache
            b. Re-resolve from DNS (will get new node after failover)
            c. Retry with new node
-        4. If still fails after DNS re-resolution, raise error
+        4. If fencing error (lease_expired/not_primary), exclude that storage and find another
+        5. If still fails after all attempts, raise error
         """
         await self._ensure_client()
         
         # Track if we've already tried DNS re-resolution
         dns_refreshed = False
         last_error: Optional[Exception] = None
+        failed_storage_id: Optional[str] = None  # Storage que falló por fencing
         
         for attempt in range(self.max_retries + 1):  # +1 for DNS refresh attempt
             try:
                 # Get current Storage Node from DNS
+                # Si hubo error de fencing, excluir ese storage y buscar alternativo
                 storage_url, storage_id = self._get_storage_info(
-                    force_refresh=dns_refreshed
+                    force_refresh=dns_refreshed,
+                    exclude_storage_id=failed_storage_id
                 )
                 
                 logger.debug(
-                    "Request to %s: %s %s (attempt %d, dns_refreshed=%s)",
+                    "Request to %s: %s %s (attempt %d, dns_refreshed=%s, excluded=%s)",
                     storage_id,
                     method,
                     path,
                     attempt + 1,
                     dns_refreshed,
+                    failed_storage_id,
                 )
                 
                 response = await self._make_request(
@@ -251,7 +265,7 @@ class StorageClient:
                     logger.info(
                         "Circuit breaker open - invalidating DNS cache and re-resolving"
                     )
-                    self.dns_client.invalidate_storage_cache()
+                    self.dns_client.invalidate_storage_cache(storage_id if 'storage_id' in dir() else None)
                     dns_refreshed = True
                     await asyncio.sleep(self.retry_delay)
                     continue
@@ -267,12 +281,29 @@ class StorageClient:
                 )
                 last_error = e
                 
-                # If we haven't refreshed DNS yet, do it now
+                # Detectar errores de fencing y marcar el storage para exclusión
+                is_fencing_error = isinstance(e, StorageRequestError) and "Fencing error" in str(e)
+                
+                if is_fencing_error and 'storage_id' in dir():
+                    # Error de fencing - este storage no es PRIMARY válido
+                    # Marcarlo para exclusión y buscar otro
+                    failed_storage_id = storage_id
+                    logger.info(
+                        f"Fencing error from {storage_id} - will search for alternative Storage"
+                    )
+                    self.dns_client.invalidate_storage_cache(storage_id)
+                    dns_refreshed = True
+                    
+                    if attempt < self.max_retries:
+                        await asyncio.sleep(self.retry_delay)
+                    continue
+                
+                # Si no es fencing y no hemos refrescado DNS, hacerlo
                 if not dns_refreshed and isinstance(e, StorageRequestError):
                     logger.info(
                         "Storage request failed - invalidating DNS cache for failover"
                     )
-                    self.dns_client.invalidate_storage_cache()
+                    self.dns_client.invalidate_storage_cache(self._current_storage_id)
                     dns_refreshed = True
                 
                 if attempt < self.max_retries:
