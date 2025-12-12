@@ -17,7 +17,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 from pathlib import Path
 
@@ -430,7 +430,7 @@ def list_files_for_sync(request: Request):
                 files.append({
                     "relative_path": relative_path,
                     "size": stat.st_size,
-                    "last_modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    "last_modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
                 })
         
         logger.info("[SYNC] File list generated: %d files", len(files))
@@ -445,6 +445,100 @@ def list_files_for_sync(request: Request):
     except Exception as e:
         logger.error("[SYNC] Error listing files: %s", e)
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid last_modified")
+
+    # Normalizar a UTC si viene naive (en contenedores suele ser UTC)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _resolve_safe_relative_path(relative_path: str) -> Path:
+    if not relative_path:
+        raise HTTPException(status_code=400, detail="relative_path is required")
+
+    rel = Path(relative_path)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise HTTPException(status_code=400, detail="Invalid relative_path")
+
+    full_path = (FILES_ROOT / rel).resolve()
+    try:
+        full_path.relative_to(FILES_ROOT.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return full_path
+
+
+@app.post("/internal/replicate-file")
+async def replicate_file_from_peer(
+    request: Request,
+    file: UploadFile = File(...),
+    relative_path: str = Form(...),
+    last_modified: str = Form(...),
+    shard_id: str = Form(None),
+):
+    """
+    Recibe una versión de un archivo desde otro Storage.
+
+    Se usa para resolver conflictos con política LWW: si un BACKUP tiene
+    una versión más nueva (por last_modified), la empuja al PRIMARY.
+    """
+    client_host = request.client.host if request.client else "-"
+    full_path = _resolve_safe_relative_path(relative_path)
+    modified_dt = _parse_iso_datetime(last_modified)
+
+    try:
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Escritura atómica: escribir a tmp y mover.
+        with tempfile.NamedTemporaryFile(delete=False, dir=str(full_path.parent)) as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        os.replace(tmp_path, str(full_path))
+
+        # Preservar mtime para evitar loops de sincronización.
+        mtime = modified_dt.timestamp()
+        os.utime(full_path, (mtime, mtime))
+
+        size = full_path.stat().st_size
+        file_id = compute_file_id(Path(relative_path).as_posix())
+
+        upsert_file(
+            file_id=file_id,
+            name=full_path.name,
+            path=str(full_path),
+            size=size,
+            last_modified=modified_dt,
+            shard_id=shard_id,
+        )
+
+        logger.info(
+            "[SYNC] Replicated file from %s: %s (%d bytes)",
+            client_host,
+            relative_path,
+            size,
+        )
+
+        return {
+            "status": "replicated",
+            "relative_path": relative_path,
+            "size": size,
+            "last_modified": modified_dt.isoformat(),
+            "storage_id": STORAGE_ID,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("[SYNC] Error replicating file %s: %s", relative_path, e)
+        raise HTTPException(status_code=500, detail=f"Replication error: {str(e)}")
 
 
 @app.get("/internal/file/{file_path:path}")

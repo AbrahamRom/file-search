@@ -11,7 +11,8 @@ import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Optional, Dict
-from datetime import datetime
+from datetime import datetime, timezone
+from urllib.parse import quote
 
 import httpx
 
@@ -114,14 +115,32 @@ class SyncService:
     async def sync_files(self) -> Dict[str, int]:
         """
         Synchronize files from the PRIMARY.
-        Only downloads new or modified files.
+        Last-Modified-Wins (LWW):
+        - Si el PRIMARY tiene una versión más nueva, se descarga y se preserva mtime.
+        - Si el BACKUP tiene una versión más nueva, se empuja al PRIMARY (replicate-file).
         """
         if not self._primary_url:
             logger.warning("[SyncService] No PRIMARY URL configured")
             return {"downloaded": 0, "errors": 0}
         
         downloaded = 0
+        pushed = 0
         errors = 0
+
+        def _parse_remote_mtime(value: str) -> Optional[float]:
+            if not value:
+                return None
+            try:
+                dt = datetime.fromisoformat(value)
+            except Exception:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+
+        def _safe_primary_file_url(relative_path: str) -> str:
+            # Mantener '/' para el path converter de FastAPI
+            return f"{self._primary_url}/internal/file/{quote(relative_path, safe='/')}"
         
         try:
             logger.info(f"[SyncService] Syncing files from {self._primary_url}...")
@@ -141,27 +160,35 @@ class SyncService:
                 for remote_file in remote_files:
                     relative_path = remote_file["relative_path"]
                     remote_size = remote_file["size"]
+                    remote_mtime = _parse_remote_mtime(remote_file.get("last_modified"))
                     
                     local_path = FILES_ROOT / relative_path
-                    
-                    # Check if we need to download
-                    need_download = False
-                    
+
+                    # LWW with small tolerance to avoid jitter
+                    tolerance = 0.001
                     if not local_path.exists():
-                        need_download = True
-                        logger.debug(f"[SyncService] New file: {relative_path}")
+                        action = "download"
                     else:
-                        local_size = local_path.stat().st_size
-                        if local_size != remote_size:
-                            need_download = True
-                            logger.debug(f"[SyncService] Modified file: {relative_path}")
-                    
-                    if need_download:
+                        stat = local_path.stat()
+                        local_mtime = stat.st_mtime
+                        local_size = stat.st_size
+
+                        if remote_mtime is None:
+                            # Fallback: comportamiento previo por tamaño
+                            action = "download" if local_size != remote_size else "skip"
+                        else:
+                            if remote_mtime > local_mtime + tolerance:
+                                action = "download"
+                            elif local_mtime > remote_mtime + tolerance:
+                                action = "push"
+                            else:
+                                # Tie-breaker para converger: preferir PRIMARY
+                                action = "download" if local_size != remote_size else "skip"
+
+                    if action == "download":
                         try:
                             # Download file
-                            file_response = await client.get(
-                                f"{self._primary_url}/internal/file/{relative_path}"
-                            )
+                            file_response = await client.get(_safe_primary_file_url(relative_path))
                             
                             if file_response.status_code == 200:
                                 # Create directory if needed
@@ -170,6 +197,13 @@ class SyncService:
                                 # Save file
                                 with open(local_path, "wb") as f:
                                     f.write(file_response.content)
+
+                                # Preservar mtime remoto para evitar loops
+                                if remote_mtime is not None:
+                                    try:
+                                        os.utime(local_path, (remote_mtime, remote_mtime))
+                                    except Exception:
+                                        pass
                                 
                                 downloaded += 1
                                 logger.info(f"[SyncService] Downloaded: {relative_path}")
@@ -180,9 +214,42 @@ class SyncService:
                         except Exception as e:
                             errors += 1
                             logger.error(f"[SyncService] Error downloading {relative_path}: {e}")
+
+                    elif action == "push":
+                        # Local is newer -> push to PRIMARY (LWW)
+                        try:
+                            if not local_path.is_file():
+                                continue
+
+                            local_stat = local_path.stat()
+                            payload_mtime = datetime.fromtimestamp(local_stat.st_mtime, tz=timezone.utc).isoformat()
+
+                            with open(local_path, "rb") as f:
+                                files = {"file": (local_path.name, f, "application/octet-stream")}
+                                data = {
+                                    "relative_path": relative_path,
+                                    "last_modified": payload_mtime,
+                                }
+                                push_resp = await client.post(
+                                    f"{self._primary_url}/internal/replicate-file",
+                                    files=files,
+                                    data=data,
+                                )
+
+                            if push_resp.status_code in (200, 201):
+                                pushed += 1
+                                logger.info(f"[SyncService] Pushed newer local version to PRIMARY: {relative_path}")
+                            else:
+                                errors += 1
+                                logger.warning(
+                                    f"[SyncService] Error pushing {relative_path}: {push_resp.status_code} {push_resp.text}"
+                                )
+                        except Exception as e:
+                            errors += 1
+                            logger.error(f"[SyncService] Error pushing {relative_path}: {e}")
             
             if downloaded > 0:
-                logger.info(f"[SyncService] File sync completed: {downloaded} downloaded, {errors} errors")
+                logger.info(f"[SyncService] File sync completed: {downloaded} downloaded, {pushed} pushed, {errors} errors")
             
         except httpx.TimeoutException:
             logger.error("[SyncService] Timeout syncing files")
@@ -191,7 +258,7 @@ class SyncService:
             logger.error(f"[SyncService] Error syncing files: {e}")
             errors += 1
         
-        return {"downloaded": downloaded, "errors": errors}
+        return {"downloaded": downloaded, "pushed": pushed, "errors": errors}
     
     async def full_sync(self) -> bool:
         """
