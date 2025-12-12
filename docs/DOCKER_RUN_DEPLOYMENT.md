@@ -171,9 +171,10 @@ docker run -d \
   -e DNS_PORT=5353 \
   -e DNS_ALIAS=dns \
   -e HEALTH_CHECK_INTERVAL=5 \
-  -e SYNC_INTERVAL=30 \
+  -e SYNC_INTERVAL=5 \
   -e DISCOVERY_INTERVAL=15 \
-  -e API_SERVER_TIMEOUT=15 \
+  -e API_SERVER_TIMEOUT=30 \
+  -e PROCESSOR_TIMEOUT=30 \
   file-search-dns:latest
 ```
 
@@ -246,9 +247,10 @@ docker run -d \
   -e DNS_PORT=5353 \
   -e DNS_ALIAS=dns \
   -e HEALTH_CHECK_INTERVAL=5 \
-  -e SYNC_INTERVAL=30 \
+  -e SYNC_INTERVAL=5 \
   -e DISCOVERY_INTERVAL=15 \
-  -e API_SERVER_TIMEOUT=15 \
+  -e API_SERVER_TIMEOUT=30 \
+  -e PROCESSOR_TIMEOUT=30 \
   file-search-dns:latest
 ```
 
@@ -268,9 +270,10 @@ docker run -d \
   -e DNS_PORT=5353 \
   -e DNS_ALIAS=dns \
   -e HEALTH_CHECK_INTERVAL=5 \
-  -e SYNC_INTERVAL=30 \
+  -e SYNC_INTERVAL=5 \
   -e DISCOVERY_INTERVAL=15 \
-  -e API_SERVER_TIMEOUT=15 \
+  -e API_SERVER_TIMEOUT=30 \
+  -e PROCESSOR_TIMEOUT=30 \
   file-search-dns:latest
 ```
 
@@ -549,7 +552,8 @@ docker run -d --name dns_1 --hostname dns_1 \
   -p 5353:5353 -v /srv/file-search/logs:/app/logs \
   -e LOG_DIR=/app/logs -e LOG_LEVEL=INFO -e DNS_SERVER_ID=dns_1 \
   -e DNS_PORT=5353 -e DNS_ALIAS=dns -e HEALTH_CHECK_INTERVAL=5 \
-  -e SYNC_INTERVAL=30 -e DISCOVERY_INTERVAL=15 -e API_SERVER_TIMEOUT=15 \
+  -e SYNC_INTERVAL=5 -e DISCOVERY_INTERVAL=15 -e API_SERVER_TIMEOUT=30 \
+  -e PROCESSOR_TIMEOUT=30 \
   file-search-dns:latest
 
 echo "DNS_1 iniciado"
@@ -603,7 +607,8 @@ docker run -d --name dns_2 --hostname dns_2 \
   -p 5354:5353 -v /srv/file-search/logs:/app/logs \
   -e LOG_DIR=/app/logs -e LOG_LEVEL=INFO -e DNS_SERVER_ID=dns_2 \
   -e DNS_PORT=5353 -e DNS_ALIAS=dns -e HEALTH_CHECK_INTERVAL=5 \
-  -e SYNC_INTERVAL=30 -e DISCOVERY_INTERVAL=15 -e API_SERVER_TIMEOUT=15 \
+  -e SYNC_INTERVAL=5 -e DISCOVERY_INTERVAL=15 -e API_SERVER_TIMEOUT=30 \
+  -e PROCESSOR_TIMEOUT=30 \
   file-search-dns:latest
 
 echo "DNS_2 iniciado"
@@ -614,7 +619,8 @@ docker run -d --name dns_3 --hostname dns_3 \
   -p 5355:5353 -v /srv/file-search/logs:/app/logs \
   -e LOG_DIR=/app/logs -e LOG_LEVEL=INFO -e DNS_SERVER_ID=dns_3 \
   -e DNS_PORT=5353 -e DNS_ALIAS=dns -e HEALTH_CHECK_INTERVAL=5 \
-  -e SYNC_INTERVAL=30 -e DISCOVERY_INTERVAL=15 -e API_SERVER_TIMEOUT=15 \
+  -e SYNC_INTERVAL=5 -e DISCOVERY_INTERVAL=15 -e API_SERVER_TIMEOUT=30 \
+  -e PROCESSOR_TIMEOUT=30 \
   file-search-dns:latest
 
 echo "DNS_3 iniciado"
