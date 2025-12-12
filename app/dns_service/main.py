@@ -460,42 +460,79 @@ async def register_dns_server(request: RegisterRequest):
 async def register_api_server(request: APIServerRegisterRequest, background_tasks: BackgroundTasks):
     """
     Registra un servidor API y le asigna un rol (PRIMARY o BACKUP).
-    El primer servidor en registrarse es el PRIMARY.
+    
+    Comportamiento:
+    - Primer servidor en registrarse -> PRIMARY
+    - Servidores subsecuentes -> BACKUP
+    - Si un nodo caído vuelve (re-registración) -> BACKUP (si ya hay PRIMARY activo)
+    
     El registro se propaga automáticamente a todos los otros DNS.
     """
     async with api_servers_lock:
         now = datetime.now().isoformat()
+        now_dt = datetime.now()
         
-        # Verificar si ya hay un PRIMARY activo
+        # Verificar si este servidor ya estaba registrado (re-registración)
+        is_reregistration = request.server_id in api_servers
+        old_role = api_servers.get(request.server_id, {}).get("role", None) if is_reregistration else None
+        
+        if is_reregistration:
+            logger.info(
+                f"[{server_id}] Storage node {request.server_id} re-registrándose "
+                f"(rol anterior: {old_role})"
+            )
+        
+        # Verificar si ya hay un PRIMARY activo y vivo
         current_primary = None
         for sid, info in api_servers.items():
             if info["role"] == "PRIMARY":
                 # Verificar si el PRIMARY está vivo
                 last_hb = datetime.fromisoformat(info["last_heartbeat"])
-                elapsed = (datetime.now() - last_hb).total_seconds()
+                elapsed = (now_dt - last_hb).total_seconds()
                 if elapsed < API_SERVER_TIMEOUT:
                     current_primary = sid
                     break
         
         # Asignar rol y epoch/lease
         global primary_epoch
-        if current_primary is None:
-            assigned_role = "PRIMARY"
-            primary_epoch += 1
-            lease_expires = datetime.now().timestamp() + LEASE_DURATION
-            logger.info(f"[{server_id}] Servidor API {request.server_id} registrado como PRIMARY (epoch={primary_epoch})")
-        else:
+        
+        # Si era PRIMARY y se está re-registrando, pero ya hay otro PRIMARY activo,
+        # debe volver como BACKUP
+        if is_reregistration and old_role == "PRIMARY" and current_primary and current_primary != request.server_id:
             assigned_role = "BACKUP"
             lease_expires = None
-            logger.info(f"[{server_id}] Servidor API {request.server_id} registrado como BACKUP (PRIMARY: {current_primary})")
+            logger.warning(
+                f"[{server_id}] Storage node {request.server_id} era PRIMARY pero ahora hay "
+                f"un nuevo PRIMARY ({current_primary}). Re-registrando como BACKUP."
+            )
+        elif current_primary is None:
+            # No hay PRIMARY activo, este será el PRIMARY
+            assigned_role = "PRIMARY"
+            primary_epoch += 1
+            lease_expires = now_dt.timestamp() + LEASE_DURATION
+            logger.info(
+                f"[{server_id}] Storage node {request.server_id} registrado como PRIMARY "
+                f"(epoch={primary_epoch}, re-registración={is_reregistration})"
+            )
+        else:
+            # Ya hay un PRIMARY, este será BACKUP
+            assigned_role = "BACKUP"
+            lease_expires = None
+            logger.info(
+                f"[{server_id}] Storage node {request.server_id} registrado como BACKUP "
+                f"(PRIMARY actual: {current_primary}, re-registración={is_reregistration})"
+            )
         
-        # Registrar servidor
+        # Preservar registered_at original si es re-registración (para mantener antigüedad)
+        original_registered_at = api_servers.get(request.server_id, {}).get("registered_at", now) if is_reregistration else now
+        
+        # Registrar o actualizar servidor
         server_info = {
             "ip": request.ip,
             "port": request.port,
             "role": assigned_role,
             "last_heartbeat": now,
-            "registered_at": now,
+            "registered_at": original_registered_at,  # Preservar timestamp original
             "primary_epoch": primary_epoch if assigned_role == "PRIMARY" else None,
             "lease_expires_at": datetime.fromtimestamp(lease_expires).isoformat() if lease_expires else None
         }
@@ -540,15 +577,28 @@ async def api_server_heartbeat(request: APIServerHeartbeatRequest, background_ta
     """
     Recibe heartbeat de un servidor API y verifica/actualiza su rol.
     Maneja la promoción de BACKUPs a PRIMARY si es necesario.
+    
+    IMPORTANTE: Esta función detecta cuando el PRIMARY actual ha caído y
+    promueve automáticamente un BACKUP. No asume que storage_1 es el PRIMARY.
+    
+    Si un nodo fue eliminado (por timeout) y vuelve, debe re-registrarse primero.
     """
     async with api_servers_lock:
         if request.server_id not in api_servers:
-            raise HTTPException(status_code=404, detail="Servidor no registrado")
+            # El servidor no está registrado (fue eliminado o nunca se registró)
+            logger.warning(
+                f"[{server_id}] Storage node {request.server_id} envió heartbeat pero no está "
+                f"registrado. Debe re-registrarse usando /server/register"
+            )
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Servidor {request.server_id} no registrado. Debe registrarse primero usando /server/register"
+            )
         
         now = datetime.now()
         now_iso = now.isoformat()
         
-        # Verificar estado del PRIMARY actual
+        # Verificar estado del PRIMARY actual (si existe alguno)
         current_primary = None
         primary_alive = False
         
@@ -558,6 +608,13 @@ async def api_server_heartbeat(request: APIServerHeartbeatRequest, background_ta
                 last_hb = datetime.fromisoformat(info["last_heartbeat"])
                 elapsed = (now - last_hb).total_seconds()
                 primary_alive = elapsed < API_SERVER_TIMEOUT
+                
+                # Log detallado del estado del PRIMARY
+                if not primary_alive:
+                    logger.warning(
+                        f"[{server_id}] PRIMARY actual {sid} está caído o sin respuesta "
+                        f"(último heartbeat hace {elapsed:.1f}s > timeout {API_SERVER_TIMEOUT}s)"
+                    )
                 break
         
         # Actualizar heartbeat del servidor que envía
@@ -575,49 +632,63 @@ async def api_server_heartbeat(request: APIServerHeartbeatRequest, background_ta
         
         affected_service_ids: set[str] = {request.server_id}
 
-        # Si no hay PRIMARY o el PRIMARY está caído, promover
+        # LÓGICA DE FAILOVER: Si no hay PRIMARY vivo, promover un BACKUP
         if not primary_alive:
-            if request.current_role == "BACKUP" or current_primary == request.server_id:
-                # El servidor que reporta puede ser promovido
-                # O el PRIMARY actual está reportando pero antes estaba caído
+            # Degradar el PRIMARY caído (si existe y no es el que está reportando)
+            if current_primary and current_primary != request.server_id:
+                logger.warning(
+                    f"[{server_id}] Degradando PRIMARY caído {current_primary} a BACKUP "
+                    f"(no responde > {API_SERVER_TIMEOUT}s)"
+                )
+                api_servers[current_primary]["role"] = "BACKUP"
+                api_servers[current_primary]["primary_epoch"] = None
+                api_servers[current_primary]["lease_expires_at"] = None
+                affected_service_ids.add(current_primary)
+            
+            # Elegir el BACKUP más antiguo (por registered_at) que esté vivo para promover
+            oldest_backup = None
+            oldest_time = None
+            
+            for sid, info in api_servers.items():
+                # Verificar que el nodo esté vivo (heartbeat reciente)
+                if sid == request.server_id:
+                    # El que está reportando siempre se considera vivo
+                    is_alive = True
+                else:
+                    last_hb = datetime.fromisoformat(info["last_heartbeat"])
+                    elapsed = (now - last_hb).total_seconds()
+                    is_alive = elapsed < API_SERVER_TIMEOUT
                 
-                # Elegir el BACKUP más antiguo para promover
-                oldest_backup = None
-                oldest_time = None
+                if not is_alive:
+                    continue
                 
-                for sid, info in api_servers.items():
-                    if info["role"] == "BACKUP":
-                        last_hb = datetime.fromisoformat(info["last_heartbeat"])
-                        elapsed = (now - last_hb).total_seconds()
-                        if elapsed < API_SERVER_TIMEOUT:
-                            reg_time = datetime.fromisoformat(info["registered_at"])
-                            if oldest_time is None or reg_time < oldest_time:
-                                oldest_backup = sid
-                                oldest_time = reg_time
+                reg_time = datetime.fromisoformat(info.get("registered_at", now_iso))
+                if oldest_time is None or reg_time < oldest_time:
+                    oldest_backup = sid
+                    oldest_time = reg_time
+            
+            if oldest_backup:
+                # Promover el backup más antiguo con nuevo epoch
+                primary_epoch += 1
+                lease_expires = now.timestamp() + LEASE_DURATION
+                api_servers[oldest_backup]["role"] = "PRIMARY"
+                api_servers[oldest_backup]["primary_epoch"] = primary_epoch
+                api_servers[oldest_backup]["lease_expires_at"] = datetime.fromtimestamp(lease_expires).isoformat()
                 
-                if current_primary and not primary_alive:
-                    # Marcar el PRIMARY anterior como BACKUP (está caído pero por si vuelve)
-                    logger.warning(f"[{server_id}] PRIMARY {current_primary} no responde. Timeout: {API_SERVER_TIMEOUT}s")
-                    api_servers[current_primary]["role"] = "BACKUP"
-                    affected_service_ids.add(current_primary)
+                logger.warning(
+                    f"[{server_id}] *** FAILOVER EN HEARTBEAT: Promoviendo {oldest_backup} a PRIMARY "
+                    f"(epoch={primary_epoch}, registrado: {oldest_time}) ***"
+                )
                 
-                if oldest_backup:
-                    # Promover el backup más antiguo con nuevo epoch
-                    primary_epoch += 1
-                    lease_expires = now.timestamp() + LEASE_DURATION
-                    api_servers[oldest_backup]["role"] = "PRIMARY"
-                    api_servers[oldest_backup]["primary_epoch"] = primary_epoch
-                    api_servers[oldest_backup]["lease_expires_at"] = datetime.fromtimestamp(lease_expires).isoformat()
-                    logger.warning(f"[{server_id}] *** FAILOVER: Promoviendo {oldest_backup} a PRIMARY (epoch={primary_epoch}) ***")
-
-                    affected_service_ids.add(oldest_backup)
-                    
-                    if request.server_id == oldest_backup:
-                        assigned_role = "PRIMARY"
-                elif request.server_id == current_primary:
-                    # El PRIMARY vuelve a estar activo
+                affected_service_ids.add(oldest_backup)
+                
+                if request.server_id == oldest_backup:
                     assigned_role = "PRIMARY"
-                    api_servers[request.server_id]["role"] = "PRIMARY"
+            elif request.server_id == current_primary:
+                # El PRIMARY anterior vuelve a estar activo (era el que reportaba)
+                assigned_role = "PRIMARY"
+                api_servers[request.server_id]["role"] = "PRIMARY"
+                logger.info(f"[{server_id}] PRIMARY {request.server_id} vuelve a estar activo")
         
         # Si soy BACKUP, obtener info del PRIMARY
         if assigned_role == "BACKUP":
@@ -662,18 +733,34 @@ async def resolve_api_server():
     """
     Resuelve la IP del servidor API PRIMARY actual.
     Usado por los clientes para saber a qué servidor conectarse.
+    
+    IMPORTANTE: Esta función NO asume que storage_1 es el PRIMARY.
+    Busca dinámicamente cuál nodo tiene el rol PRIMARY y está vivo.
+    Si el PRIMARY está caído, promueve automáticamente un BACKUP.
     """
     async with api_servers_lock:
         now = datetime.now()
         
-        # Buscar el PRIMARY activo
+        # Primero verificar si hay algún PRIMARY registrado y si está vivo
+        current_primary_sid = None
+        current_primary_info = None
+        primary_is_alive = False
+        
         for sid, info in api_servers.items():
             if info["role"] == "PRIMARY":
+                current_primary_sid = sid
+                current_primary_info = info
+                
                 last_hb = datetime.fromisoformat(info["last_heartbeat"])
                 elapsed = (now - last_hb).total_seconds()
+                primary_is_alive = elapsed < API_SERVER_TIMEOUT
                 
-                if elapsed < API_SERVER_TIMEOUT:
-                    logger.info(f"[{server_id}] Resolución de servidor API -> {sid} ({info['ip']})")
+                if primary_is_alive:
+                    # PRIMARY está vivo, devolverlo
+                    logger.info(
+                        f"[{server_id}] Resolución de servidor API -> PRIMARY {sid} "
+                        f"({info['ip']}:{info['port']}) - último heartbeat hace {elapsed:.1f}s"
+                    )
                     return APIServerResolveResponse(
                         server_id=sid,
                         ip=info["ip"],
@@ -683,34 +770,77 @@ async def resolve_api_server():
                         primary_epoch=info.get("primary_epoch"),
                         lease_expires_at=info.get("lease_expires_at")
                     )
+                else:
+                    # PRIMARY está caído
+                    logger.warning(
+                        f"[{server_id}] PRIMARY {sid} está caído "
+                        f"(último heartbeat hace {elapsed:.1f}s > timeout {API_SERVER_TIMEOUT}s)"
+                    )
+                    break
         
-        # No hay PRIMARY activo, buscar un BACKUP vivo
+        # Si llegamos aquí, no hay PRIMARY vivo. Buscar un BACKUP para promover
+        logger.warning(f"[{server_id}] No hay PRIMARY vivo. Buscando BACKUP para promover...")
+        
+        # Degradar el PRIMARY caído a BACKUP (si existe)
+        if current_primary_sid and not primary_is_alive:
+            logger.warning(
+                f"[{server_id}] Degradando {current_primary_sid} de PRIMARY a BACKUP "
+                f"(sin heartbeat por {(now - datetime.fromisoformat(current_primary_info['last_heartbeat'])).total_seconds():.1f}s)"
+            )
+            api_servers[current_primary_sid]["role"] = "BACKUP"
+        
+        # Buscar el BACKUP más antiguo (por registered_at) que esté vivo
+        best_backup = None
+        best_backup_sid = None
+        oldest_registration = None
+        
         for sid, info in api_servers.items():
             last_hb = datetime.fromisoformat(info["last_heartbeat"])
             elapsed = (now - last_hb).total_seconds()
             
-            if elapsed < API_SERVER_TIMEOUT:
-                # Promover este BACKUP a PRIMARY con nuevo epoch
-                global primary_epoch
-                primary_epoch += 1
-                lease_expires = now.timestamp() + LEASE_DURATION
-                api_servers[sid]["role"] = "PRIMARY"
-                api_servers[sid]["primary_epoch"] = primary_epoch
-                api_servers[sid]["lease_expires_at"] = datetime.fromtimestamp(lease_expires).isoformat()
-                logger.warning(f"[{server_id}] No hay PRIMARY. Promoviendo {sid} a PRIMARY en resolución (epoch={primary_epoch})")
-                
-                return APIServerResolveResponse(
-                    server_id=sid,
-                    ip=info["ip"],
-                    port=info["port"],
-                    role="PRIMARY",
-                    url=f"http://{info['ip']}:{info['port']}",
-                    primary_epoch=primary_epoch,
-                    lease_expires_at=api_servers[sid]["lease_expires_at"]
-                )
+            # Solo considerar nodos vivos
+            if elapsed >= API_SERVER_TIMEOUT:
+                continue
+            
+            reg_time = datetime.fromisoformat(info.get("registered_at", now.isoformat()))
+            
+            if oldest_registration is None or reg_time < oldest_registration:
+                oldest_registration = reg_time
+                best_backup = info
+                best_backup_sid = sid
         
-        logger.error(f"[{server_id}] No hay servidores API disponibles")
-        raise HTTPException(status_code=503, detail="No hay servidores API disponibles")
+        # Si encontramos un BACKUP vivo, promoverlo
+        if best_backup_sid:
+            global primary_epoch
+            primary_epoch += 1
+            lease_expires = now.timestamp() + LEASE_DURATION
+            
+            api_servers[best_backup_sid]["role"] = "PRIMARY"
+            api_servers[best_backup_sid]["primary_epoch"] = primary_epoch
+            api_servers[best_backup_sid]["lease_expires_at"] = datetime.fromtimestamp(lease_expires).isoformat()
+            
+            logger.warning(
+                f"[{server_id}] *** FAILOVER AUTOMÁTICO: Promoviendo {best_backup_sid} "
+                f"({best_backup['ip']}:{best_backup['port']}) a PRIMARY (epoch={primary_epoch}) ***"
+            )
+            
+            return APIServerResolveResponse(
+                server_id=best_backup_sid,
+                ip=best_backup["ip"],
+                port=best_backup["port"],
+                role="PRIMARY",
+                url=f"http://{best_backup['ip']}:{best_backup['port']}",
+                primary_epoch=primary_epoch,
+                lease_expires_at=api_servers[best_backup_sid]["lease_expires_at"]
+            )
+        
+        # No hay ningún storage node disponible
+        logger.error(f"[{server_id}] No hay servidores API (storage nodes) disponibles en el clúster")
+        logger.error(f"[{server_id}] Storage nodes registrados: {list(api_servers.keys())}")
+        raise HTTPException(
+            status_code=503, 
+            detail="No hay servidores API disponibles. Todos los storage nodes están caídos."
+        )
 
 
 @app.get("/server/list")
@@ -1297,6 +1427,80 @@ async def propagate_to_backups(hostname: str, ip: str):
             logger.error(f"[{server_id}] Error propagando a {sid}: {e}")
 
 
+async def cleanup_dead_api_servers():
+    """Elimina servidores API (storage nodes) que han excedido el timeout"""
+    async with api_servers_lock:
+        now = datetime.now()
+        servers_to_remove = []
+        
+        for sid, info in api_servers.items():
+            last_hb_str = info.get("last_heartbeat")
+            if not last_hb_str:
+                continue
+            
+            try:
+                last_hb = datetime.fromisoformat(last_hb_str)
+                elapsed = (now - last_hb).total_seconds()
+                
+                if elapsed > API_SERVER_TIMEOUT:
+                    servers_to_remove.append(sid)
+                    
+            except (ValueError, TypeError) as e:
+                logger.debug(f"[{server_id}] Error parseando last_heartbeat de {sid}: {e}")
+        
+        # Eliminar servidores muertos
+        for sid in servers_to_remove:
+            info = api_servers[sid]
+            logger.warning(
+                f"[{server_id}] Eliminando storage node {sid} ({info.get('ip')}:{info.get('port')}) "
+                f"del registro - sin heartbeat por >{API_SERVER_TIMEOUT}s (role: {info.get('role')})"
+            )
+            del api_servers[sid]
+        
+        if servers_to_remove:
+            logger.info(
+                f"[{server_id}] Limpieza completada: {len(servers_to_remove)} storage node(s) eliminado(s). "
+                f"Nodos activos: {list(api_servers.keys())}"
+            )
+
+
+async def cleanup_dead_processor_servers():
+    """Elimina processor nodes que han excedido el timeout"""
+    async with processor_servers_lock:
+        now = datetime.now()
+        processors_to_remove = []
+        
+        for pid, info in processor_servers.items():
+            last_hb_str = info.get("last_heartbeat")
+            if not last_hb_str:
+                continue
+            
+            try:
+                last_hb = datetime.fromisoformat(last_hb_str)
+                elapsed = (now - last_hb).total_seconds()
+                
+                if elapsed > PROCESSOR_TIMEOUT:
+                    processors_to_remove.append(pid)
+                    
+            except (ValueError, TypeError) as e:
+                logger.debug(f"[{server_id}] Error parseando last_heartbeat de {pid}: {e}")
+        
+        # Eliminar processors muertos
+        for pid in processors_to_remove:
+            info = processor_servers[pid]
+            logger.warning(
+                f"[{server_id}] Eliminando processor node {pid} ({info.get('ip')}:{info.get('port')}) "
+                f"del registro - sin heartbeat por >{PROCESSOR_TIMEOUT}s"
+            )
+            del processor_servers[pid]
+        
+        if processors_to_remove:
+            logger.info(
+                f"[{server_id}] Limpieza completada: {len(processors_to_remove)} processor(s) eliminado(s). "
+                f"Processors activos: {list(processor_servers.keys())}"
+            )
+
+
 async def sync_from_primary():
     """Sincroniza el estado completo desde el primario (cache, api_servers, processor_servers)"""
     global current_primary_url
@@ -1376,6 +1580,12 @@ async def health_check_loop():
             
             # Limpiar servidores DNS que han excedido el timeout
             await cleanup_dead_dns_servers()
+            
+            # Limpiar storage nodes muertos
+            await cleanup_dead_api_servers()
+            
+            # Limpiar processor nodes muertos
+            await cleanup_dead_processor_servers()
             
             # Determinar mi rol basándome en el estado actual
             await determine_role()
