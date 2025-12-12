@@ -158,11 +158,75 @@ def api_url(path: str) -> str:
     base_url = get_api_base_url()
     return urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
 
+
+def _get_browser_accessible_url() -> str:
+    """
+    Obtiene una URL accesible desde el navegador del usuario.
+    
+    En caso de partición de red, el BROWSER_API_URL configurado puede no ser alcanzable.
+    Esta función intenta obtener una URL que funcione:
+    1. Primero intenta resolver un Processor via DNS (funcionará en la partición actual)
+    2. Si el Processor resuelto tiene una IP privada de Docker, usa BROWSER_API_URL como fallback
+    3. Como último recurso usa BROWSER_API_URL
+    """
+    # Intentar resolver el Processor actual via DNS
+    processor_url = _resolve_server_from_dns()
+    
+    if processor_url:
+        # Extraer el host del Processor resuelto
+        from urllib.parse import urlparse
+        parsed = urlparse(processor_url)
+        processor_host = parsed.hostname
+        
+        # Si es un nombre de contenedor Docker (ej: processor_1, processor_2),
+        # necesitamos resolverlo a una IP accesible externamente
+        import socket
+        try:
+            # Intentar resolver el hostname a IP
+            processor_ip = socket.gethostbyname(processor_host)
+            
+            # Verificar si es una IP de red overlay Docker (10.0.x.x típicamente)
+            # Estas IPs no son accesibles desde fuera de Docker
+            if processor_ip.startswith("10.0.") or processor_ip.startswith("172."):
+                # Usar la URL configurada para el navegador pero con failover
+                browser_url = os.getenv("BROWSER_API_URL", "http://localhost:8000")
+                
+                # Intentar detectar si hay un Processor local accesible
+                # Extraer el processor_id del URL resuelto (ej: processor_2)
+                if "processor_2" in processor_host or "processor_2" in processor_url:
+                    # Estamos usando processor_2, intentar con el puerto del worker
+                    worker_port = os.getenv("BROWSER_API_URL_WORKER", None)
+                    if worker_port:
+                        return worker_port
+                    # Intentar construir URL con IP del worker
+                    try:
+                        # Obtener nuestra propia IP externa
+                        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        s.connect(("8.8.8.8", 80))
+                        my_ip = s.getsockname()[0]
+                        s.close()
+                        # Usar puerto 8001 para processor_2 en el worker
+                        return f"http://{my_ip}:8001"
+                    except Exception:
+                        pass
+                
+                return browser_url
+            else:
+                # La IP parece ser accesible externamente
+                return f"http://{processor_ip}:{parsed.port or 8000}"
+                
+        except socket.gaierror:
+            # No se pudo resolver, usar fallback
+            pass
+    
+    # Fallback: URL configurada
+    return os.getenv("BROWSER_API_URL", "http://localhost:8000")
+
+
 def build_download_url(record: Dict) -> str:
     """Construye la URL de descarga para el navegador del usuario."""
-    # NOTA: El navegador NO usa nuestro DNS interno, así que seguimos usando
-    # la URL pública/externa configurada.
-    browser_url = os.getenv("BROWSER_API_URL", "http://localhost:8000")
+    # Obtener URL accesible desde el navegador (con failover en caso de partición)
+    browser_url = _get_browser_accessible_url()
     return urljoin(browser_url.rstrip("/") + "/", f"files/{record['file_id']}/download")
 
 

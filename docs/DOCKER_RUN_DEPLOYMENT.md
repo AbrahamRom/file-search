@@ -366,12 +366,15 @@ docker run -d \
   -e TARGET_SERVICE_PORT=8000 \
   -e API_BASE_URL=http://processor_1:8000 \
   -e BROWSER_API_URL=http://<IP_MANAGER>:8000 \
+  -e BROWSER_API_URL_WORKER=http://<IP_WORKER>:8001 \
   -e MAX_RETRIES=3 \
   -e RETRY_DELAY=0.5 \
   file-search-client:latest
 ```
 
-> **Nota:** Reemplaza `<IP_MANAGER>` con la IP real del Manager para que el navegador pueda descargar archivos.
+> **Nota:** Reemplaza `<IP_MANAGER>` y `<IP_WORKER>` con las IPs reales. 
+> - `BROWSER_API_URL` se usa para descargas cuando el Manager está disponible
+> - `BROWSER_API_URL_WORKER` es el fallback cuando hay partición de red y solo el Worker está disponible
 
 ---
 
@@ -668,6 +671,9 @@ docker run -d --name processor_2 --hostname processor_2 \
 
 echo "Processor_2 iniciado"
 
+# Obtener IP del Worker para BROWSER_API_URL_WORKER
+WORKER_IP=$(hostname -I | awk '{print $1}')
+
 # Client
 docker run -d --name client --hostname client \
   --network file_search_net \
@@ -676,6 +682,7 @@ docker run -d --name client --hostname client \
   -e TARGET_SERVICE_NAME=processor -e TARGET_SERVICE_PORT=8000 \
   -e API_BASE_URL=http://processor_1:8000 \
   -e BROWSER_API_URL=http://${MANAGER_IP}:8000 \
+  -e BROWSER_API_URL_WORKER=http://${WORKER_IP}:8001 \
   -e MAX_RETRIES=3 -e RETRY_DELAY=0.5 \
   file-search-client:latest
 
