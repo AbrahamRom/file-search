@@ -15,7 +15,8 @@ COPY app/client /app/client
 ENV PYTHONPATH=/app \
     DNS_SERVICE_HOST=dns_service \
     TARGET_SERVICE_NAME=server \
-    TARGET_SERVICE_PORT=8000
+    TARGET_SERVICE_PORT=8000 \
+    BROWSER_API_URL=http://localhost:8000
 
 EXPOSE 8501
 

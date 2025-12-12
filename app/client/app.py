@@ -68,6 +68,10 @@ TARGET_SERVICE_PORT = os.getenv("TARGET_SERVICE_PORT", "8000")
 DEFAULT_PAGE_SIZE = int(os.getenv("CLIENT_PAGE_SIZE", "10"))
 DEFAULT_TYPE = "Todos"
 
+# URL base para el navegador del usuario (fuera de Docker)
+# Esta URL es la que el navegador usará para descargar archivos
+BROWSER_API_URL = os.getenv("BROWSER_API_URL", "http://localhost:8000")
+
 # Configuración de reintentos
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
 RETRY_DELAY = float(os.getenv("RETRY_DELAY", 0.5))
@@ -159,56 +163,32 @@ def api_url(path: str) -> str:
     return urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
 
 
-def _get_browser_accessible_url() -> str:
+def build_download_url(record: dict) -> str:
     """
-    Obtiene una URL accesible desde el navegador del usuario.
+    Construye la URL de descarga para un archivo.
     
-    En caso de partición de red, el BROWSER_API_URL configurado puede no ser alcanzable.
-    Esta función intenta obtener una URL que funcione:
-    1. Detecta qué Processor está en uso (processor_1 o processor_2)
-    2. Usa la URL correspondiente (BROWSER_API_URL o BROWSER_API_URL_WORKER)
+    Usa BROWSER_API_URL porque esta URL será usada por el navegador del usuario,
+    que está fuera de la red Docker y necesita acceder al servicio via los
+    puertos expuestos (8000 para processor_1, 8001 para processor_2, etc.).
+    
+    Args:
+        record: Diccionario con la información del archivo (debe contener 'file_id')
+    
+    Returns:
+        URL completa para descargar el archivo
     """
-    # Intentar resolver el Processor actual via DNS
-    processor_url = _resolve_server_from_dns()
+    file_id = record.get("file_id", "")
+    if not file_id:
+        logger.warning(f"Registro sin file_id: {record}")
+        return "#"
     
-    if processor_url:
-        # Detectar si estamos usando processor_2 (Worker)
-        if "processor_2" in processor_url:
-            # Estamos usando processor_2, usar URL del Worker
-            worker_url = os.getenv("BROWSER_API_URL_WORKER", None)
-            if worker_url:
-                logger.info(f"Usando BROWSER_API_URL_WORKER: {worker_url}")
-                return worker_url
-            
-            # Si no hay BROWSER_API_URL_WORKER configurado, intentar construir una
-            import socket
-            try:
-                # Obtener nuestra propia IP externa
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                my_ip = s.getsockname()[0]
-                s.close()
-                # Usar puerto 8001 para processor_2 en el worker
-                constructed_url = f"http://{my_ip}:8001"
-                logger.info(f"Construyendo URL de Worker: {constructed_url}")
-                return constructed_url
-            except Exception as e:
-                logger.warning(f"No se pudo detectar IP del Worker: {e}")
-        
-        # Estamos usando processor_1 o no pudimos detectar - usar URL del Manager
-        browser_url = os.getenv("BROWSER_API_URL", "http://localhost:8000")
-        logger.info(f"Usando BROWSER_API_URL: {browser_url}")
-        return browser_url
-    
-    # Fallback: URL configurada
-    return os.getenv("BROWSER_API_URL", "http://localhost:8000")
+    # Usar la URL del navegador (accesible desde fuera de Docker)
+    base_url = BROWSER_API_URL.rstrip("/")
+    return f"{base_url}/files/{file_id}/download"
 
 
-def build_download_url(record: Dict) -> str:
-    """Construye la URL de descarga para el navegador del usuario."""
-    # Obtener URL accesible desde el navegador (con failover en caso de partición)
-    browser_url = _get_browser_accessible_url()
-    return urljoin(browser_url.rstrip("/") + "/", f"files/{record['file_id']}/download")
+
+
 
 
 def make_request_with_retry(method: str, path: str, **kwargs) -> requests.Response:
