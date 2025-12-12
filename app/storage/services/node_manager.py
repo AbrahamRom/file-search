@@ -121,30 +121,42 @@ class NodeManager:
                 return hostname if hostname else None
     
     def _discover_dns(self) -> Optional[str]:
-        """
-        Discover a DNS server using the Docker DNS alias.
-        Returns the URL of the first available DNS server.
-        """
+        """Backward-compatible: retorna una URL candidata (no valida salud)."""
+        urls = self._discover_dns_urls()
+        return urls[0] if urls else None
+
+    def _discover_dns_urls(self) -> list[str]:
+        """Descubre todas las URLs de DNS (alias Docker puede devolver varias IPs)."""
         try:
             results = socket.getaddrinfo(
-                self.dns_alias, 
-                self.dns_port, 
-                socket.AF_INET, 
+                self.dns_alias,
+                self.dns_port,
+                socket.AF_INET,
                 socket.SOCK_STREAM,
             )
             ips = sorted(set(result[4][0] for result in results))
-            
-            if ips:
-                dns_ip = ips[0]
-                url = f"http://{dns_ip}:{self.dns_port}"
-                logger.info(f"[NodeManager] DNS discovered: {url} (of {len(ips)} available)")
-                return url
-                
+            return [f"http://{ip}:{self.dns_port}" for ip in ips]
         except socket.gaierror as e:
             logger.warning(f"[NodeManager] Could not resolve DNS alias '{self.dns_alias}': {e}")
         except Exception as e:
             logger.error(f"[NodeManager] Error discovering DNS: {e}")
-        
+        return []
+
+    async def _select_healthy_dns(self, *, timeout: float = 2.0) -> Optional[str]:
+        """Elige el primer DNS que responda /health."""
+        urls = self._discover_dns_urls()
+        if not urls:
+            return None
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for url in urls:
+                try:
+                    resp = await client.get(f"{url}/health")
+                    if resp.status_code == 200:
+                        logger.info(f"[NodeManager] DNS available at {url} (of {len(urls)} discovered)")
+                        return url
+                except Exception:
+                    continue
         return None
     
     async def wait_for_dns(self) -> bool:
@@ -155,18 +167,11 @@ class NodeManager:
         logger.info(f"[NodeManager] Waiting for DNS to be available...")
         
         for attempt in range(1, DNS_MAX_RETRIES + 1):
-            dns_url = self._discover_dns()
-            
+            dns_url = await self._select_healthy_dns(timeout=2.0)
             if dns_url:
-                try:
-                    async with httpx.AsyncClient(timeout=5.0) as client:
-                        response = await client.get(f"{dns_url}/health")
-                        if response.status_code == 200:
-                            self._dns_url = dns_url
-                            logger.info(f"[NodeManager] DNS available at {dns_url} (attempt {attempt})")
-                            return True
-                except Exception as e:
-                    logger.debug(f"[NodeManager] DNS not responding: {e}")
+                self._dns_url = dns_url
+                logger.info(f"[NodeManager] DNS selected: {dns_url} (attempt {attempt})")
+                return True
             
             logger.info(f"[NodeManager] DNS not available, retrying in {DNS_RETRY_INTERVAL}s... ({attempt}/{DNS_MAX_RETRIES})")
             await asyncio.sleep(DNS_RETRY_INTERVAL)
@@ -268,11 +273,22 @@ class NodeManager:
                     
         except httpx.TimeoutException:
             logger.warning("[NodeManager] Heartbeat timeout")
-            self._dns_url = self._discover_dns()
+            self._dns_url = None
+            await self._try_failover_dns()
         except Exception as e:
             logger.error(f"[NodeManager] Heartbeat error: {e}")
-            self._dns_url = self._discover_dns()
+            self._dns_url = None
+            await self._try_failover_dns()
         
+        return False
+
+    async def _try_failover_dns(self) -> bool:
+        """Intenta rápidamente elegir otro DNS saludable sin bloquear demasiado."""
+        new_dns = await self._select_healthy_dns(timeout=1.0)
+        if new_dns:
+            self._dns_url = new_dns
+            logger.warning(f"[NodeManager] DNS failover -> {new_dns}")
+            return True
         return False
     
     def _notify_role_change(self, old_role: str):

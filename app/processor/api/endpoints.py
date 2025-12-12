@@ -21,6 +21,7 @@ import os
 from datetime import datetime
 from typing import List, Optional
 from contextlib import asynccontextmanager
+import time
 
 try:
     fastapi = importlib.import_module("fastapi")
@@ -70,6 +71,11 @@ HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", 5))
 
 # Flag para controlar el loop de heartbeat
 _heartbeat_task: Optional[asyncio.Task] = None
+
+# Cache de DNS URL saludable (para registro/heartbeat)
+_cached_dns_url: Optional[str] = None
+_cached_dns_ts: float = 0.0
+_dns_url_cache_ttl: float = float(os.getenv("DNS_URL_CACHE_TTL", 10))
 
 
 # ============================================================================
@@ -162,15 +168,37 @@ async def _get_my_ip() -> str:
 
 
 async def _discover_dns_url() -> Optional[str]:
-    """Discover a DNS server URL."""
+    """Discover a healthy DNS server URL (with failover across all alias IPs)."""
+    global _cached_dns_url, _cached_dns_ts
+
+    if _cached_dns_url and (time.time() - _cached_dns_ts) < _dns_url_cache_ttl:
+        return _cached_dns_url
+
     import socket
+    import httpx
+
     try:
         results = socket.getaddrinfo(DNS_ALIAS, DNS_PORT, socket.AF_INET, socket.SOCK_STREAM)
         ips = sorted(set(result[4][0] for result in results))
-        if ips:
-            return f"http://{ips[0]}:{DNS_PORT}"
     except Exception as e:
         logger.warning("Error discovering DNS: %s", e)
+        ips = []
+
+    if not ips:
+        return None
+
+    async with httpx.AsyncClient(timeout=2.0) as client:
+        for ip in ips:
+            url = f"http://{ip}:{DNS_PORT}"
+            try:
+                resp = await client.get(f"{url}/health")
+                if resp.status_code == 200:
+                    _cached_dns_url = url
+                    _cached_dns_ts = time.time()
+                    return url
+            except Exception:
+                continue
+
     return None
 
 
@@ -205,6 +233,9 @@ async def _register_with_dns():
                 logger.error("DNS registration failed: %s", response.text)
     except Exception as e:
         logger.error("Error registering with DNS: %s", e)
+        global _cached_dns_url, _cached_dns_ts
+        _cached_dns_url = None
+        _cached_dns_ts = 0.0
     
     return False
 
@@ -226,6 +257,9 @@ async def _send_heartbeat():
             return response.status_code == 200
     except Exception as e:
         logger.debug("Heartbeat failed: %s", e)
+        global _cached_dns_url, _cached_dns_ts
+        _cached_dns_url = None
+        _cached_dns_ts = 0.0
         # Try to re-register if heartbeat fails
         return await _register_with_dns()
 

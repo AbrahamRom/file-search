@@ -28,9 +28,10 @@ services:
       - DNS_PORT=5353
       - DNS_ALIAS=dns
       - HEALTH_CHECK_INTERVAL=5
-      - SYNC_INTERVAL=30
+      - SYNC_INTERVAL=5
       - DISCOVERY_INTERVAL=15
-      - API_SERVER_TIMEOUT=15
+      - API_SERVER_TIMEOUT=30
+      - PROCESSOR_TIMEOUT=30
     volumes:
       - type: bind
         source: ${LOGS_SOURCE:-/srv/file-search/logs}
@@ -62,9 +63,10 @@ services:
       - DNS_PORT=5353
       - DNS_ALIAS=dns
       - HEALTH_CHECK_INTERVAL=5
-      - SYNC_INTERVAL=30
+      - SYNC_INTERVAL=5
       - DISCOVERY_INTERVAL=15
-      - API_SERVER_TIMEOUT=15
+      - API_SERVER_TIMEOUT=30
+      - PROCESSOR_TIMEOUT=30
     volumes:
       - type: bind
         source: ${LOGS_SOURCE:-/srv/file-search/logs}
@@ -96,9 +98,10 @@ services:
       - DNS_PORT=5353
       - DNS_ALIAS=dns
       - HEALTH_CHECK_INTERVAL=5
-      - SYNC_INTERVAL=30
+      - SYNC_INTERVAL=5
       - DISCOVERY_INTERVAL=15
-      - API_SERVER_TIMEOUT=15
+      - API_SERVER_TIMEOUT=30
+      - PROCESSOR_TIMEOUT=30
     volumes:
       - type: bind
         source: ${LOGS_SOURCE:-/srv/file-search/logs}

@@ -78,17 +78,16 @@ _cache_timestamp: float = 0
 _cache_ttl: float = 30  # TTL del cache en segundos
 
 
-def _discover_dns_url() -> Optional[str]:
-    """Descubre la URL de un servidor DNS usando el alias de Docker."""
+def _discover_dns_urls() -> List[str]:
+    """Descubre todas las URLs de DNS usando el alias de Docker (puede devolver varias IPs)."""
     import socket
     try:
         results = socket.getaddrinfo(DNS_ALIAS, DNS_SERVICE_PORT, socket.AF_INET, socket.SOCK_STREAM)
         ips = sorted(set(result[4][0] for result in results))  # Ordenar para consistencia
-        if ips:
-            return f"http://{ips[0]}:{DNS_SERVICE_PORT}"
+        return [f"http://{ip}:{DNS_SERVICE_PORT}" for ip in ips]
     except Exception as e:
         logger.warning(f"Error descubriendo DNS: {e}")
-    return None
+    return []
 
 
 def _resolve_server_from_dns() -> Optional[str]:
@@ -102,25 +101,31 @@ def _resolve_server_from_dns() -> Optional[str]:
     if _cached_server_url and (time.time() - _cache_timestamp) < _cache_ttl:
         return _cached_server_url
     
-    dns_url = _discover_dns_url()
-    if not dns_url:
-        logger.warning("No se pudo descubrir el DNS")
+    dns_urls = _discover_dns_urls()
+    if not dns_urls:
+        logger.warning("No se pudo descubrir ningún DNS")
         return None
-    
-    try:
-        response = requests.get(f"{dns_url}/processor/resolve", timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            server_url = data.get("url")
-            if server_url:
-                _cached_server_url = server_url
-                _cache_timestamp = time.time()
-                logger.info(f"Processor resuelto via DNS: {server_url}")
-                return server_url
-        elif response.status_code == 503:
-            logger.warning("DNS reporta que no hay processors disponibles")
-    except Exception as e:
-        logger.error(f"Error consultando DNS: {e}")
+
+    last_error: Optional[Exception] = None
+    for dns_url in dns_urls:
+        try:
+            response = requests.get(f"{dns_url}/processor/resolve", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                server_url = data.get("url")
+                if server_url:
+                    _cached_server_url = server_url
+                    _cache_timestamp = time.time()
+                    logger.info(f"Processor resuelto via DNS ({dns_url}): {server_url}")
+                    return server_url
+            elif response.status_code == 503:
+                logger.warning(f"{dns_url} reporta que no hay processors disponibles")
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Error consultando DNS {dns_url}: {e}")
+
+    if last_error:
+        logger.error(f"No se pudo consultar ningún DNS (último error: {last_error})")
     
     return None
 

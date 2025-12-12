@@ -516,7 +516,7 @@ async def register_api_server(request: APIServerRegisterRequest, background_task
 
 
 @app.post("/server/heartbeat")
-async def api_server_heartbeat(request: APIServerHeartbeatRequest):
+async def api_server_heartbeat(request: APIServerHeartbeatRequest, background_tasks: BackgroundTasks):
     """
     Recibe heartbeat de un servidor API y verifica/actualiza su rol.
     Maneja la promoción de BACKUPs a PRIMARY si es necesario.
@@ -546,6 +546,8 @@ async def api_server_heartbeat(request: APIServerHeartbeatRequest):
         assigned_role = api_servers[request.server_id]["role"]
         primary_info = None
         
+        affected_service_ids: set[str] = {request.server_id}
+
         # Si no hay PRIMARY o el PRIMARY está caído, promover
         if not primary_alive:
             if request.current_role == "BACKUP" or current_primary == request.server_id:
@@ -570,11 +572,14 @@ async def api_server_heartbeat(request: APIServerHeartbeatRequest):
                     # Marcar el PRIMARY anterior como BACKUP (está caído pero por si vuelve)
                     logger.warning(f"[{server_id}] PRIMARY {current_primary} no responde. Timeout: {API_SERVER_TIMEOUT}s")
                     api_servers[current_primary]["role"] = "BACKUP"
+                    affected_service_ids.add(current_primary)
                 
                 if oldest_backup:
                     # Promover el backup más antiguo
                     api_servers[oldest_backup]["role"] = "PRIMARY"
                     logger.warning(f"[{server_id}] *** FAILOVER: Promoviendo {oldest_backup} a PRIMARY ***")
+
+                    affected_service_ids.add(oldest_backup)
                     
                     if request.server_id == oldest_backup:
                         assigned_role = "PRIMARY"
@@ -594,6 +599,17 @@ async def api_server_heartbeat(request: APIServerHeartbeatRequest):
                         "url": f"http://{info['ip']}:{info['port']}"
                     }
                     break
+
+        # Propagar heartbeat/rol actualizado a otros DNS en background
+        for sid in affected_service_ids:
+            if sid in api_servers:
+                server_info = dict(api_servers[sid])
+                background_tasks.add_task(
+                    propagate_service_registration,
+                    "api_server",
+                    sid,
+                    server_info,
+                )
         
         return {
             "status": "ok",
