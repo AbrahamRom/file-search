@@ -238,6 +238,7 @@ services:
     environment:
       - PROCESSOR_ID=processor_1
       - PROCESSOR_PORT=8000
+      - PROCESSOR_EXTERNAL_PORT=8000
       # Configuración DNS - el Processor descubre Storage via DNS
       - DNS_ALIAS=dns
       - DNS_SERVICE_PORT=5353
@@ -269,6 +270,7 @@ services:
     environment:
       - PROCESSOR_ID=processor_2
       - PROCESSOR_PORT=8000
+      - PROCESSOR_EXTERNAL_PORT=8001
       # Configuración DNS - el Processor descubre Storage via DNS
       - DNS_ALIAS=dns
       - DNS_SERVICE_PORT=5353

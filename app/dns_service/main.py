@@ -226,6 +226,7 @@ class ProcessorRegisterRequest(BaseModel):
     processor_id: str
     ip: str
     port: int = 8000
+    external_port: Optional[int] = None  # Puerto accesible desde fuera de Docker
 
 
 class ProcessorHeartbeatRequest(BaseModel):
@@ -909,6 +910,7 @@ async def register_processor(request: ProcessorRegisterRequest, background_tasks
         processor_info = {
             "ip": request.ip,
             "port": request.port,
+            "external_port": request.external_port or request.port,
             "last_heartbeat": now,
             "registered_at": now,
             "healthy": True
@@ -916,7 +918,10 @@ async def register_processor(request: ProcessorRegisterRequest, background_tasks
         
         processor_servers[request.processor_id] = processor_info
         
-        logger.info(f"[{server_id}] Processor {request.processor_id} registrado ({request.ip}:{request.port})")
+        logger.info(
+            f"[{server_id}] Processor {request.processor_id} registrado "
+            f"({request.ip}:{request.port}, externo:{processor_info['external_port']})"
+        )
         
         # Propagar a otros DNS en background
         background_tasks.add_task(
@@ -1017,9 +1022,11 @@ async def list_processors():
                 "processor_id": pid,
                 "ip": info["ip"],
                 "port": info["port"],
+                "external_port": info.get("external_port", info["port"]),
                 "last_heartbeat": info["last_heartbeat"],
                 "registered_at": info["registered_at"],
                 "url": f"http://{info['ip']}:{info['port']}",
+                "external_url": f"http://localhost:{info.get('external_port', info['port'])}",
                 "alive": elapsed < PROCESSOR_TIMEOUT,
                 "seconds_since_heartbeat": int(elapsed)
             })
