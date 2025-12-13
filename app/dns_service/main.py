@@ -103,6 +103,10 @@ api_servers_lock = asyncio.Lock()
 # Lock para operaciones atómicas en processor_servers
 processor_servers_lock = asyncio.Lock()
 
+# Timestamp de la última verificación de split-brain
+last_split_brain_check: float = 0
+SPLIT_BRAIN_CHECK_INTERVAL = 5  # Verificar cada 5 segundos
+
 
 # ============================================================================
 # MODELOS PYDANTIC
@@ -354,7 +358,7 @@ async def resolve_hostname(hostname: str, background_tasks: BackgroundTasks):
 
 
 @app.post("/sync")
-async def receive_sync(sync_data: SyncData):
+async def receive_sync(sync_data: SyncData, background_tasks: BackgroundTasks):
     """Recibe actualizaciones de sincronización desde otro DNS (primario u otro nodo)"""
     logger.info(f"[{server_id}] Recibiendo sync desde {sync_data.source_id}")
     
@@ -394,6 +398,9 @@ async def receive_sync(sync_data: SyncData):
     sync_status["sync_count"] += 1
     
     logger.info(f"[{server_id}] Sync completada. Cache: {len(dns_cache)}, API servers: {len(api_servers)}, Processors: {len(processor_servers)}")
+    
+    # VERIFICACIÓN SPLIT-BRAIN: Después de recibir sync, verificar consistencia
+    background_tasks.add_task(resolve_split_brain)
     
     return {
         "status": "synced", 
@@ -545,12 +552,6 @@ async def register_api_server(request: APIServerRegisterRequest, background_task
             request.server_id, 
             server_info
         )
-        # Notify the storage node of its assigned role so it can apply immediately
-        background_tasks.add_task(
-            propagate_role_to_storage,
-            request.server_id,
-            server_info,
-        )
         
         # Obtener info del PRIMARY actual para que los backups sepan a quién sincronizar
         primary_info = None
@@ -566,16 +567,19 @@ async def register_api_server(request: APIServerRegisterRequest, background_task
         # Incluir epoch y lease en la respuesta para PRIMARY
         response_epoch = server_info.get("primary_epoch") if assigned_role == "PRIMARY" else None
         response_lease = server_info.get("lease_expires_at") if assigned_role == "PRIMARY" else None
-        
-        return {
-            "status": "registered",
-            "assigned_role": assigned_role,
-            "server_id": request.server_id,
-            "primary_info": primary_info,
-            "primary_epoch": response_epoch,
-            "lease_expires_at": response_lease,
-            "total_servers": len(api_servers)
-        }
+    
+    # VERIFICACIÓN SPLIT-BRAIN: Ejecutar fuera del lock
+    background_tasks.add_task(resolve_split_brain)
+    
+    return {
+        "status": "registered",
+        "assigned_role": assigned_role,
+        "server_id": request.server_id,
+        "primary_info": primary_info,
+        "primary_epoch": response_epoch,
+        "lease_expires_at": response_lease,
+        "total_servers": len(api_servers)
+    }
 
 
 @app.post("/server/heartbeat")
@@ -718,26 +722,23 @@ async def api_server_heartbeat(request: APIServerHeartbeatRequest, background_ta
                     sid,
                     server_info,
                 )
-                # También notificar al storage node para que aplique el rol inmediatamente
-                background_tasks.add_task(
-                    propagate_role_to_storage,
-                    sid,
-                    server_info,
-                )
         
         # Obtener epoch y lease del servidor actual para incluirlo en la respuesta
         current_server_info = api_servers.get(request.server_id, {})
         response_epoch = current_server_info.get("primary_epoch") if assigned_role == "PRIMARY" else None
         response_lease = current_server_info.get("lease_expires_at") if assigned_role == "PRIMARY" else None
-        
-        return {
-            "status": "ok",
-            "assigned_role": assigned_role,
-            "primary_info": primary_info,
-            "primary_epoch": response_epoch,
-            "lease_expires_at": response_lease,
-            "timestamp": now_iso
-        }
+    
+    # VERIFICACIÓN SPLIT-BRAIN: Ejecutar fuera del lock para evitar deadlock
+    background_tasks.add_task(resolve_split_brain)
+    
+    return {
+        "status": "ok",
+        "assigned_role": assigned_role,
+        "primary_info": primary_info,
+        "primary_epoch": response_epoch,
+        "lease_expires_at": response_lease,
+        "timestamp": now_iso
+    }
 
 
 @app.get("/server/resolve", response_model=APIServerResolveResponse)
@@ -835,11 +836,6 @@ async def resolve_api_server():
                 f"[{server_id}] *** FAILOVER AUTOMÁTICO: Promoviendo {best_backup_sid} "
                 f"({best_backup['ip']}:{best_backup['port']}) a PRIMARY (epoch={primary_epoch}) ***"
             )
-            # Notify the promoted storage node so it can apply role immediately
-            try:
-                asyncio.create_task(propagate_role_to_storage(best_backup_sid, api_servers[best_backup_sid]))
-            except Exception:
-                logger.debug(f"[{server_id}] Could not schedule role notification for {best_backup_sid}")
             
             return APIServerResolveResponse(
                 server_id=best_backup_sid,
@@ -1002,6 +998,99 @@ async def resolve_processor():
 
 
 @app.get("/processor/list")
+async def list_processors():
+    """Lista todos los Processor Nodes registrados con su estado."""
+    async with processor_servers_lock:
+        now = datetime.now()
+        processors = []
+        
+        for pid, info in processor_servers.items():
+            last_hb = datetime.fromisoformat(info["last_heartbeat"])
+            elapsed = (now - last_hb).total_seconds()
+            processors.append({
+                "processor_id": pid,
+                "ip": info["ip"],
+                "port": info["port"],
+                "last_heartbeat": info["last_heartbeat"],
+                "registered_at": info["registered_at"],
+                "url": f"http://{info['ip']}:{info['port']}",
+                "alive": elapsed < PROCESSOR_TIMEOUT,
+                "seconds_since_heartbeat": int(elapsed)
+            })
+        
+        return {
+            "processors": processors,
+            "total": len(processors),
+            "active": sum(1 for p in processors if p["alive"]),
+            "timestamp": now.isoformat()
+        }
+
+
+@app.get("/cluster/health")
+async def cluster_health():
+    """
+    Endpoint de diagnóstico para monitorear el estado del cluster de Storage Nodes.
+    Detecta y reporta problemas como split-brain (múltiples PRIMARY).
+    """
+    async with api_servers_lock:
+        now = datetime.now()
+        
+        # Detectar múltiples PRIMARY
+        primaries = detect_multiple_primaries()
+        has_split_brain = len(primaries) > 1
+        
+        # Información detallada de todos los nodos
+        nodes_info = []
+        for sid, info in api_servers.items():
+            last_hb = datetime.fromisoformat(info["last_heartbeat"])
+            elapsed = (now - last_hb).total_seconds()
+            is_alive = elapsed < API_SERVER_TIMEOUT
+            
+            nodes_info.append({
+                "server_id": sid,
+                "role": info.get("role"),
+                "ip": info.get("ip"),
+                "port": info.get("port"),
+                "alive": is_alive,
+                "seconds_since_heartbeat": round(elapsed, 2),
+                "primary_epoch": info.get("primary_epoch"),
+                "lease_expires_at": info.get("lease_expires_at"),
+                "registered_at": info.get("registered_at"),
+                "last_heartbeat": info.get("last_heartbeat"),
+            })
+        
+        # Estadísticas
+        total_nodes = len(nodes_info)
+        active_nodes = sum(1 for n in nodes_info if n["alive"])
+        primary_count = len(primaries)
+        backup_count = sum(1 for n in nodes_info if n["role"] == "BACKUP")
+        
+        # Determinar el líder actual (o el que debería ser)
+        current_leader = None
+        if primaries:
+            current_leader = elect_single_leader(primaries)
+        
+        return {
+            "cluster_status": "split_brain" if has_split_brain else "healthy",
+            "split_brain_detected": has_split_brain,
+            "multiple_primaries": primaries if has_split_brain else None,
+            "current_leader": current_leader,
+            "global_primary_epoch": primary_epoch,
+            "statistics": {
+                "total_nodes": total_nodes,
+                "active_nodes": active_nodes,
+                "primary_count": primary_count,
+                "backup_count": backup_count,
+            },
+            "nodes": nodes_info,
+            "dns_server_id": server_id,
+            "dns_role": server_role,
+            "timestamp": now.isoformat(),
+            "last_split_brain_check": datetime.fromtimestamp(last_split_brain_check).isoformat() if last_split_brain_check > 0 else None,
+        }
+
+
+@app.post("/notify-new-primary")
 async def list_processors():
     """Lista todos los Processor Nodes registrados con su estado."""
     async with processor_servers_lock:
@@ -1367,6 +1456,187 @@ async def notify_promotion():
 
 
 # ============================================================================
+# LEADER ELECTION & SPLIT-BRAIN RESOLUTION
+# ============================================================================
+
+def detect_multiple_primaries() -> List[str]:
+    """
+    Detecta si hay múltiples nodos storage con rol PRIMARY.
+    Retorna la lista de server_ids que se creen PRIMARY.
+    """
+    primaries = []
+    for sid, info in api_servers.items():
+        if info.get("role") == "PRIMARY":
+            primaries.append(sid)
+    
+    if len(primaries) > 1:
+        logger.warning(
+            f"[{server_id}] *** SPLIT-BRAIN DETECTADO: {len(primaries)} nodos PRIMARY: {primaries} ***"
+        )
+    
+    return primaries
+
+
+def elect_single_leader(primaries: List[str]) -> str:
+    """
+    Elige un único líder entre múltiples PRIMARY usando criterios determinísticos:
+    1. PRIMARY con epoch más alto (última promoción válida)
+    2. Si hay empate, el registrado primero (registered_at más antiguo)
+    3. Si aún hay empate, ID lexicográfico menor (determinista)
+    
+    Args:
+        primaries: Lista de server_ids que se creen PRIMARY
+        
+    Returns:
+        El server_id del líder elegido
+    """
+    if not primaries:
+        return None
+    
+    if len(primaries) == 1:
+        return primaries[0]
+    
+    # Construir lista de candidatos con sus métricas
+    candidates = []
+    for sid in primaries:
+        info = api_servers.get(sid)
+        if not info:
+            continue
+        
+        candidates.append({
+            "server_id": sid,
+            "primary_epoch": info.get("primary_epoch", 0) or 0,
+            "registered_at": info.get("registered_at", datetime.now().isoformat()),
+            "last_heartbeat": info.get("last_heartbeat", ""),
+        })
+    
+    if not candidates:
+        return None
+    
+    # Ordenar por:
+    # 1. Epoch descendente (mayor epoch gana)
+    # 2. registered_at ascendente (más antiguo gana)
+    # 3. server_id ascendente (lexicográfico)
+    candidates.sort(
+        key=lambda x: (
+            -x["primary_epoch"],  # Mayor epoch primero
+            x["registered_at"],   # Más antiguo primero
+            x["server_id"]        # ID menor primero
+        )
+    )
+    
+    winner = candidates[0]
+    logger.info(
+        f"[{server_id}] Líder elegido: {winner['server_id']} "
+        f"(epoch={winner['primary_epoch']}, registered={winner['registered_at']})"
+    )
+    
+    return winner["server_id"]
+
+
+async def resolve_split_brain():
+    """
+    Resuelve situaciones de split-brain donde múltiples nodos se creen PRIMARY.
+    
+    Algoritmo:
+    1. Detectar múltiples PRIMARY
+    2. Elegir un único líder usando criterios determinísticos
+    3. Degradar (fence) a los perdedores a BACKUP
+    4. Notificar a los nodos afectados mediante propagación
+    
+    Esta función se ejecuta periódicamente y en eventos críticos (heartbeat, sync).
+    """
+    global last_split_brain_check, primary_epoch
+    
+    now = time.time()
+    
+    # Throttling: no verificar muy frecuentemente
+    if now - last_split_brain_check < SPLIT_BRAIN_CHECK_INTERVAL:
+        return
+    
+    last_split_brain_check = now
+    
+    async with api_servers_lock:
+        # Detectar múltiples PRIMARY
+        primaries = detect_multiple_primaries()
+        
+        if len(primaries) <= 1:
+            # No hay conflicto
+            return
+        
+        logger.warning(
+            f"[{server_id}] *** RESOLVIENDO SPLIT-BRAIN: {len(primaries)} PRIMARY detectados ***"
+        )
+        
+        # Elegir líder único
+        winner_id = elect_single_leader(primaries)
+        
+        if not winner_id:
+            logger.error(f"[{server_id}] No se pudo elegir líder en split-brain resolution")
+            return
+        
+        # Degradar perdedores a BACKUP
+        losers = [sid for sid in primaries if sid != winner_id]
+        
+        for loser_id in losers:
+            if loser_id not in api_servers:
+                continue
+            
+            logger.warning(
+                f"[{server_id}] *** FENCING: Degradando {loser_id} de PRIMARY a BACKUP ***"
+            )
+            
+            # Cambiar rol a BACKUP
+            api_servers[loser_id]["role"] = "BACKUP"
+            api_servers[loser_id]["primary_epoch"] = None
+            api_servers[loser_id]["lease_expires_at"] = None
+            
+            # Propagar cambio a otros DNS (sin await para no bloquear)
+            asyncio.create_task(
+                propagate_service_registration(
+                    "api_server",
+                    loser_id,
+                    dict(api_servers[loser_id])
+                )
+            )
+        
+        # Asegurar que el ganador tenga epoch actualizado
+        if winner_id in api_servers:
+            winner_epoch = api_servers[winner_id].get("primary_epoch", 0)
+            
+            # Incrementar epoch global si es necesario
+            if winner_epoch is None or winner_epoch < primary_epoch:
+                primary_epoch += 1
+                api_servers[winner_id]["primary_epoch"] = primary_epoch
+                
+                # Renovar lease del ganador
+                now_dt = datetime.now()
+                lease_expires = now_dt.timestamp() + LEASE_DURATION
+                api_servers[winner_id]["lease_expires_at"] = datetime.fromtimestamp(lease_expires).isoformat()
+                
+                logger.info(
+                    f"[{server_id}] Ganador {winner_id} actualizado con epoch={primary_epoch}"
+                )
+            else:
+                # El epoch del ganador es el más alto, actualizamos el global
+                primary_epoch = winner_epoch
+            
+            # Propagar estado del ganador
+            asyncio.create_task(
+                propagate_service_registration(
+                    "api_server",
+                    winner_id,
+                    dict(api_servers[winner_id])
+                )
+            )
+        
+        logger.warning(
+            f"[{server_id}] *** SPLIT-BRAIN RESUELTO: {winner_id} es el PRIMARY único, "
+            f"{len(losers)} nodo(s) degradado(s) ***"
+        )
+
+
+# ============================================================================
 # SINCRONIZACIÓN
 # ============================================================================
 
@@ -1410,41 +1680,6 @@ async def propagate_service_registration(service_type: str, service_id: str, ser
                     logger.debug(f"[{server_id}] Registro de {service_type}/{service_id} propagado a {sid}")
         except Exception as e:
             logger.debug(f"[{server_id}] Error propagando registro a {sid}: {e}")
-
-
-async def propagate_role_to_storage(service_id: str, service_info: dict):
-    """
-    Notify a storage node about its assigned role.
-    This posts to the storage node endpoint `/internal/set_role` so the node
-    updates its NodeManager state without waiting for the next heartbeat.
-    """
-    ip = service_info.get("ip")
-    port = service_info.get("port")
-    if not ip or not port:
-        return
-
-    url = f"http://{ip}:{port}/internal/set_role"
-    payload = {
-        "role": service_info.get("role"),
-        "primary_info": {
-            "server_id": service_id,
-            "ip": ip,
-            "port": port,
-            "url": f"http://{ip}:{port}"
-        } if service_info.get("role") == "PRIMARY" else None,
-        "primary_epoch": service_info.get("primary_epoch"),
-        "lease_expires_at": service_info.get("lease_expires_at"),
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.post(url, json=payload)
-            if resp.status_code == 200:
-                logger.info(f"[{server_id}] Notified storage {service_id} of role {service_info.get('role')}")
-            else:
-                logger.debug(f"[{server_id}] Storage {service_id} responded {resp.status_code} to role notification: {resp.text}")
-    except Exception as e:
-        logger.debug(f"[{server_id}] Error notifying storage {service_id}: {e}")
 
 
 async def propagate_to_backups(hostname: str, ip: str):
@@ -1662,6 +1897,27 @@ async def sync_loop():
             sync_status["is_syncing"] = False
 
 
+async def split_brain_monitor_loop():
+    """
+    Loop de monitoreo y resolución automática de split-brain.
+    Ejecuta verificaciones periódicas independientes de otros eventos.
+    """
+    logger.info(f"[{server_id}] Iniciando monitor de split-brain (intervalo: {SPLIT_BRAIN_CHECK_INTERVAL}s)")
+    
+    while True:
+        try:
+            await asyncio.sleep(SPLIT_BRAIN_CHECK_INTERVAL)
+            
+            # Forzar verificación sin throttling (ya que el loop controla el intervalo)
+            global last_split_brain_check
+            last_split_brain_check = 0  # Reset para forzar verificación
+            
+            await resolve_split_brain()
+            
+        except Exception as e:
+            logger.error(f"[{server_id}] Error en split-brain monitor loop: {e}")
+
+
 # ============================================================================
 # STARTUP
 # ============================================================================
@@ -1716,6 +1972,7 @@ async def startup_event():
     asyncio.create_task(discovery_loop())
     asyncio.create_task(health_check_loop())
     asyncio.create_task(sync_loop())
+    asyncio.create_task(split_brain_monitor_loop())  # Monitor de split-brain
     
     logger.info(f"[{server_id}] DNS Service HA iniciado. Rol: {server_role}")
 

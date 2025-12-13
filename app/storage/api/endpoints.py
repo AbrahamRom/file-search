@@ -682,40 +682,6 @@ def _resolve_safe_relative_path(relative_path: str) -> Path:
     return full_path
 
 
-@app.post("/internal/set_role")
-def internal_set_role(payload: dict):
-    """
-    Endpoint used by DNS service to enforce a role assignment.
-    Payload should contain:
-    - role: 'PRIMARY' or 'BACKUP'
-    - primary_info: optional dict with primary details
-    - primary_epoch: optional int
-    - lease_expires_at: optional ISO datetime string
-    """
-    node_mgr = get_node_manager()
-
-    role = payload.get("role")
-    primary_info = payload.get("primary_info")
-    primary_epoch = payload.get("primary_epoch")
-    lease_expires_at = payload.get("lease_expires_at")
-
-    if not role:
-        raise HTTPException(status_code=400, detail="role is required")
-
-    try:
-        node_mgr.apply_dns_assignment(
-            assigned_role=role,
-            primary_info=primary_info,
-            primary_epoch=primary_epoch,
-            lease_expires_at=lease_expires_at,
-        )
-        logger.info("Internal role assignment applied: %s", role)
-        return {"status": "ok", "role": role}
-    except Exception as e:
-        logger.error("Error applying internal role assignment: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.post("/internal/replicate-file")
 async def replicate_file_from_peer(
     request: Request,
