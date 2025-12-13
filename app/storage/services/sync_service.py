@@ -463,15 +463,18 @@ class SyncService:
             try:
                 # Get current PRIMARY URL
                 primary_url = get_primary_url_fn()
-                self.set_primary_url(primary_url)
+                
+                if primary_url != self._primary_url:
+                    logger.info(f"[SyncService] PRIMARY URL changed: {self._primary_url} -> {primary_url}")
+                    self.set_primary_url(primary_url)
                 
                 if primary_url:
                     await self.full_sync()
                 else:
-                    logger.debug("[SyncService] No PRIMARY available for sync")
+                    logger.warning("[SyncService] No PRIMARY URL available for sync (PRIMARY may be down or not registered)")
                     
             except Exception as e:
-                logger.error(f"[SyncService] Error in sync loop: {e}")
+                logger.error(f"[SyncService] Error in sync loop: {e}", exc_info=True)
             
             await asyncio.sleep(SYNC_INTERVAL)
     

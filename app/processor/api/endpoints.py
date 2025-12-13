@@ -171,22 +171,9 @@ async def _discover_dns_url() -> Optional[str]:
     """Discover a healthy DNS server URL (with failover across all alias IPs)."""
     global _cached_dns_url, _cached_dns_ts
 
+    # Solo validar cache si no ha expirado el TTL
     if _cached_dns_url and (time.time() - _cached_dns_ts) < _dns_url_cache_ttl:
-        # Verificar que el URL en cache sigue siendo válido
-        import httpx
-        try:
-            async with httpx.AsyncClient(timeout=1.0) as client:
-                resp = await client.get(f"{_cached_dns_url}/health")
-                if resp.status_code == 200:
-                    return _cached_dns_url
-                else:
-                    logger.debug("Cached DNS URL no longer healthy, rediscovering...")
-        except Exception:
-            logger.debug("Cached DNS URL unreachable, rediscovering...")
-        
-        # Invalidar cache si no es alcanzable
-        _cached_dns_url = None
-        _cached_dns_ts = 0.0
+        return _cached_dns_url
 
     import socket
     import httpx
