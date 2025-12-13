@@ -101,6 +101,25 @@ class DNSClientHA:
             ]
         self._bootstrapped = True
     
+    def _attempt_rebootstrap(self) -> bool:
+        """
+        Intenta re-bootstrapear el cliente DNS después de una falla.
+        Útil para recuperarse de particiones de red.
+        """
+        logger.warning("[DNSClientHA] Intentando re-bootstrap después de falla...")
+        
+        # Limpiar estado anterior
+        with self._lock:
+            self._dns_servers = []
+            self._primary_url = None
+            self._cache = {}
+            self._bootstrapped = False
+        
+        # Re-ejecutar bootstrap
+        self._bootstrap()
+        
+        return self._bootstrapped
+    
     def _discover_via_alias(self) -> List[str]:
         """
         Descubre servidores DNS usando el alias compartido de Docker DNS.
@@ -254,9 +273,11 @@ class DNSClientHA:
         
         Flujo:
         1. Verificar cache local (TTL)
-        2. Intentar con el primario primero
-        3. Intentar con cada servidor DNS en orden
-        4. Si todos fallan, usar fallback a Docker DNS nativo
+        2. Verificar si necesitamos re-bootstrap
+        3. Intentar con el primario primero
+        4. Intentar con cada servidor DNS en orden
+        5. Si todos fallan, intentar re-bootstrap y reintentar
+        6. Usar fallback a Docker DNS nativo
         
         Args:
             hostname: Nombre del host a resolver
@@ -277,16 +298,21 @@ class DNSClientHA:
                 logger.debug(f"[DNSClientHA] Cache EXPIRED: {hostname}")
                 del self._cache[hostname]
         
+        # 2. Verificar si necesitamos re-bootstrap
+        if not self._bootstrapped:
+            logger.warning("[DNSClientHA] Cliente no bootstrapeado, intentando bootstrap...")
+            self._bootstrap()
+        
         # Refrescar lista de servidores si es necesario
         self._maybe_refresh_servers()
         
-        # 2. Intentar con el primario primero
+        # 3. Intentar con el primario primero
         if self._primary_url:
             ip = self._try_resolve(self._primary_url, hostname)
             if ip:
                 return ip
         
-        # 3. Intentar con cada servidor DNS en orden
+        # 4. Intentar con cada servidor DNS en orden
         with self._lock:
             servers_copy = list(self._dns_servers)
         
@@ -315,7 +341,29 @@ class DNSClientHA:
                 server["healthy"] = True
                 return ip
         
-        # 4. Fallback: Docker DNS nativo
+        # 5. Intentar re-bootstrap si todos los servidores fallaron
+        logger.warning("[DNSClientHA] Todos los servidores fallaron. Intentando re-bootstrap...")
+        if self._attempt_rebootstrap():
+            logger.info("[DNSClientHA] Re-bootstrap exitoso, reintentando resolución...")
+            
+            # Reintentar con el primario
+            if self._primary_url:
+                ip = self._try_resolve(self._primary_url, hostname)
+                if ip:
+                    return ip
+            
+            # Reintentar con servidores actualizados
+            with self._lock:
+                servers_copy = list(self._dns_servers)
+            
+            for server in servers_copy:
+                if not server.get("healthy"):
+                    continue
+                ip = self._try_resolve(server.get("url"), hostname)
+                if ip:
+                    return ip
+        
+        # 6. Fallback: Docker DNS nativo
         logger.warning(f"[DNSClientHA] Todos los servidores DNS fallaron. Usando fallback nativo para '{hostname}'")
         try:
             ip = socket.gethostbyname(hostname)
