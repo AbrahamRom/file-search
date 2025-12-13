@@ -75,7 +75,11 @@ class NodeManager:
     def primary_url(self) -> Optional[str]:
         """URL of the current PRIMARY."""
         if self._primary_info:
-            return self._primary_info.get("url")
+            url = self._primary_info.get("url")
+            if url:
+                return url
+            else:
+                logger.debug("[NodeManager] primary_info exists but has no URL: %s", self._primary_info)
         return None
     
     @property
@@ -310,9 +314,17 @@ class NodeManager:
                     
                     # Update PRIMARY info
                     if new_primary_info != self._primary_info:
+                        old_primary_url = self.primary_url
                         self._primary_info = new_primary_info
+                        new_primary_url = self.primary_url
+                        
+                        if old_primary_url != new_primary_url:
+                            logger.info(f"[NodeManager] PRIMARY URL changed: {old_primary_url} -> {new_primary_url}")
+                        
                         if self._primary_info:
-                            logger.info(f"[NodeManager] PRIMARY updated: {self._primary_info}")
+                            logger.info(f"[NodeManager] PRIMARY info updated: {self._primary_info}")
+                        else:
+                            logger.warning("[NodeManager] PRIMARY info cleared (no PRIMARY available)")
                     
                     return True
                 elif response.status_code == 404:

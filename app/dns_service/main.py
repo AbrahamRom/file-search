@@ -103,6 +103,16 @@ api_servers_lock = asyncio.Lock()
 # Lock para operaciones atómicas en processor_servers
 processor_servers_lock = asyncio.Lock()
 
+# Timestamp de la última verificación de split-brain
+last_split_brain_check: float = 0
+SPLIT_BRAIN_CHECK_INTERVAL = 5  # Verificar cada 5 segundos
+
+# Variables para el algoritmo de bully
+election_in_progress: bool = False
+election_timeout: float = 5.0  # Timeout para considerar respuestas en elección
+last_election_time: float = 0
+ELECTION_COOLDOWN = 10  # Cooldown entre elecciones (en segundos)
+
 
 # ============================================================================
 # MODELOS PYDANTIC
@@ -354,7 +364,7 @@ async def resolve_hostname(hostname: str, background_tasks: BackgroundTasks):
 
 
 @app.post("/sync")
-async def receive_sync(sync_data: SyncData):
+async def receive_sync(sync_data: SyncData, background_tasks: BackgroundTasks):
     """Recibe actualizaciones de sincronización desde otro DNS (primario u otro nodo)"""
     logger.info(f"[{server_id}] Recibiendo sync desde {sync_data.source_id}")
     
@@ -394,6 +404,9 @@ async def receive_sync(sync_data: SyncData):
     sync_status["sync_count"] += 1
     
     logger.info(f"[{server_id}] Sync completada. Cache: {len(dns_cache)}, API servers: {len(api_servers)}, Processors: {len(processor_servers)}")
+    
+    # VERIFICACIÓN SPLIT-BRAIN: Después de recibir sync, verificar consistencia
+    background_tasks.add_task(resolve_split_brain)
     
     return {
         "status": "synced", 
@@ -560,16 +573,19 @@ async def register_api_server(request: APIServerRegisterRequest, background_task
         # Incluir epoch y lease en la respuesta para PRIMARY
         response_epoch = server_info.get("primary_epoch") if assigned_role == "PRIMARY" else None
         response_lease = server_info.get("lease_expires_at") if assigned_role == "PRIMARY" else None
-        
-        return {
-            "status": "registered",
-            "assigned_role": assigned_role,
-            "server_id": request.server_id,
-            "primary_info": primary_info,
-            "primary_epoch": response_epoch,
-            "lease_expires_at": response_lease,
-            "total_servers": len(api_servers)
-        }
+    
+    # VERIFICACIÓN SPLIT-BRAIN: Ejecutar fuera del lock
+    background_tasks.add_task(resolve_split_brain)
+    
+    return {
+        "status": "registered",
+        "assigned_role": assigned_role,
+        "server_id": request.server_id,
+        "primary_info": primary_info,
+        "primary_epoch": response_epoch,
+        "lease_expires_at": response_lease,
+        "total_servers": len(api_servers)
+    }
 
 
 @app.post("/server/heartbeat")
@@ -717,15 +733,18 @@ async def api_server_heartbeat(request: APIServerHeartbeatRequest, background_ta
         current_server_info = api_servers.get(request.server_id, {})
         response_epoch = current_server_info.get("primary_epoch") if assigned_role == "PRIMARY" else None
         response_lease = current_server_info.get("lease_expires_at") if assigned_role == "PRIMARY" else None
-        
-        return {
-            "status": "ok",
-            "assigned_role": assigned_role,
-            "primary_info": primary_info,
-            "primary_epoch": response_epoch,
-            "lease_expires_at": response_lease,
-            "timestamp": now_iso
-        }
+    
+    # VERIFICACIÓN SPLIT-BRAIN: Ejecutar fuera del lock para evitar deadlock
+    background_tasks.add_task(resolve_split_brain)
+    
+    return {
+        "status": "ok",
+        "assigned_role": assigned_role,
+        "primary_info": primary_info,
+        "primary_epoch": response_epoch,
+        "lease_expires_at": response_lease,
+        "timestamp": now_iso
+    }
 
 
 @app.get("/server/resolve", response_model=APIServerResolveResponse)
@@ -994,6 +1013,99 @@ async def list_processors():
         for pid, info in processor_servers.items():
             last_hb = datetime.fromisoformat(info["last_heartbeat"])
             elapsed = (now - last_hb).total_seconds()
+            processors.append({
+                "processor_id": pid,
+                "ip": info["ip"],
+                "port": info["port"],
+                "last_heartbeat": info["last_heartbeat"],
+                "registered_at": info["registered_at"],
+                "url": f"http://{info['ip']}:{info['port']}",
+                "alive": elapsed < PROCESSOR_TIMEOUT,
+                "seconds_since_heartbeat": int(elapsed)
+            })
+        
+        return {
+            "processors": processors,
+            "total": len(processors),
+            "active": sum(1 for p in processors if p["alive"]),
+            "timestamp": now.isoformat()
+        }
+
+
+@app.get("/cluster/health")
+async def cluster_health():
+    """
+    Endpoint de diagnóstico para monitorear el estado del cluster de Storage Nodes.
+    Detecta y reporta problemas como split-brain (múltiples PRIMARY).
+    """
+    async with api_servers_lock:
+        now = datetime.now()
+        
+        # Detectar múltiples PRIMARY
+        primaries = detect_multiple_primaries()
+        has_split_brain = len(primaries) > 1
+        
+        # Información detallada de todos los nodos
+        nodes_info = []
+        for sid, info in api_servers.items():
+            last_hb = datetime.fromisoformat(info["last_heartbeat"])
+            elapsed = (now - last_hb).total_seconds()
+            is_alive = elapsed < API_SERVER_TIMEOUT
+            
+            nodes_info.append({
+                "server_id": sid,
+                "role": info.get("role"),
+                "ip": info.get("ip"),
+                "port": info.get("port"),
+                "alive": is_alive,
+                "seconds_since_heartbeat": round(elapsed, 2),
+                "primary_epoch": info.get("primary_epoch"),
+                "lease_expires_at": info.get("lease_expires_at"),
+                "registered_at": info.get("registered_at"),
+                "last_heartbeat": info.get("last_heartbeat"),
+            })
+        
+        # Estadísticas
+        total_nodes = len(nodes_info)
+        active_nodes = sum(1 for n in nodes_info if n["alive"])
+        primary_count = len(primaries)
+        backup_count = sum(1 for n in nodes_info if n["role"] == "BACKUP")
+        
+        # Determinar el líder actual (o el que debería ser)
+        current_leader = None
+        if primaries:
+            current_leader = elect_single_leader(primaries)
+        
+        return {
+            "cluster_status": "split_brain" if has_split_brain else "healthy",
+            "split_brain_detected": has_split_brain,
+            "multiple_primaries": primaries if has_split_brain else None,
+            "current_leader": current_leader,
+            "global_primary_epoch": primary_epoch,
+            "statistics": {
+                "total_nodes": total_nodes,
+                "active_nodes": active_nodes,
+                "primary_count": primary_count,
+                "backup_count": backup_count,
+            },
+            "nodes": nodes_info,
+            "dns_server_id": server_id,
+            "dns_role": server_role,
+            "timestamp": now.isoformat(),
+            "last_split_brain_check": datetime.fromtimestamp(last_split_brain_check).isoformat() if last_split_brain_check > 0 else None,
+        }
+
+
+@app.post("/notify-new-primary")
+async def list_processors():
+    """Lista todos los Processor Nodes registrados con su estado."""
+    async with processor_servers_lock:
+        now = datetime.now()
+        processors = []
+        
+        for pid, info in processor_servers.items():
+            last_hb = datetime.fromisoformat(info["last_heartbeat"])
+            elapsed = (now - last_hb).total_seconds()
             
             processors.append({
                 "processor_id": pid,
@@ -1014,38 +1126,87 @@ async def list_processors():
         }
 
 
-@app.post("/notify-new-primary")
-async def receive_new_primary_notification(data: dict):
-    """Recibe notificación de un nuevo primario"""
+@app.post("/election")
+async def handle_election_message(data: dict):
+    """
+    Maneja mensaje ELECTION del algoritmo de bully.
+    Responde OK y luego inicia mi propia elección si tengo mayor ID.
+    """
+    candidate_id = data.get("candidate_id")
+    
+    logger.info(f"[{server_id}] Recibido ELECTION de {candidate_id}")
+    
+    # Si mi ID es mayor, respondo OK e inicio mi propia elección
+    if server_id > candidate_id:
+        logger.info(f"[{server_id}] Mi ID es mayor que {candidate_id}. Respondiendo OK e iniciando elección...")
+        
+        # Iniciar mi propia elección en background
+        asyncio.create_task(start_election())
+        
+        return {"status": "ok", "server_id": server_id}
+    else:
+        # Mi ID es menor, no participo
+        logger.debug(f"[{server_id}] Mi ID es menor que {candidate_id}. No respondo.")
+        return {"status": "declined", "server_id": server_id}
+
+
+@app.post("/coordinator")
+async def handle_coordinator_announcement(data: dict):
+    """
+    Maneja anuncio de nuevo coordinador (PRIMARY) del algoritmo de bully.
+    """
     global server_role, current_primary_url, primary_since
     
-    new_primary_id = data.get("new_primary_id")
-    new_primary_url = data.get("new_primary_url")
-    new_primary_since = data.get("primary_since")
+    coordinator_id = data.get("coordinator_id")
+    coordinator_url = data.get("coordinator_url")
+    coordinator_primary_since = data.get("primary_since")
     
-    logger.info(f"[{server_id}] Notificación: nuevo primario es {new_primary_id}")
+    logger.info(f"[{server_id}] *** COORDINATOR RECIBIDO: {coordinator_id} es el PRIMARY ***")
     
-    if server_role == "primary" and new_primary_id != server_id:
-        # Resolver conflicto: el que fue primario primero gana
-        if new_primary_since and primary_since:
-            if new_primary_since < primary_since:
-                logger.warning(f"[{server_id}] {new_primary_id} fue primario antes. Cediendo rol...")
-                server_role = "backup"
-                current_primary_url = new_primary_url
-                primary_since = None
-        else:
-            # Sin timestamp, ceder por defecto
+    # Si yo era primary, ceder inmediatamente
+    if server_role == "primary" and coordinator_id != server_id:
+        # Verificar que el coordinador tenga mayor ID (validación)
+        if coordinator_id > server_id:
+            logger.warning(f"[{server_id}] Cediendo PRIMARY a {coordinator_id} (mayor ID)")
             server_role = "backup"
-            current_primary_url = new_primary_url
             primary_since = None
+        else:
+            # El coordinador tiene menor ID, esto es incorrecto
+            logger.error(f"[{server_id}] Coordinador {coordinator_id} tiene MENOR ID. Iniciando elección...")
+            asyncio.create_task(start_election())
+            return {"status": "rejected", "server_id": server_id}
     
-    if new_primary_id in cluster_state:
-        cluster_state[new_primary_id]["role"] = "primary"
-        cluster_state[new_primary_id]["primary_since"] = new_primary_since
+    # Actualizar estado del coordinador
+    if coordinator_id in cluster_state:
+        cluster_state[coordinator_id]["role"] = "primary"
+        cluster_state[coordinator_id]["primary_since"] = coordinator_primary_since
     
-    current_primary_url = new_primary_url
+    # Si no soy el coordinador, actualizar mi estado
+    if coordinator_id != server_id:
+        server_role = "backup"
+        primary_since = None
+        current_primary_url = coordinator_url
+        
+        # Actualizar mi entrada
+        if server_id in cluster_state:
+            cluster_state[server_id]["role"] = "backup"
+            cluster_state[server_id]["primary_since"] = None
+        
+        # Sincronizar inmediatamente
+        await sync_from_primary()
     
     return {"status": "acknowledged", "server_id": server_id}
+
+
+@app.post("/notify-new-primary")
+async def receive_new_primary_notification(data: dict):
+    """DEPRECATED: Redirigir a /coordinator para compatibilidad."""
+    return await handle_coordinator_announcement({
+        "coordinator_id": data.get("new_primary_id"),
+        "coordinator_url": data.get("new_primary_url"),
+        "primary_since": data.get("primary_since"),
+        "timestamp": data.get("timestamp")
+    })
 
 
 # ============================================================================
@@ -1263,90 +1424,393 @@ async def cleanup_dead_dns_servers():
 
 async def determine_role():
     """
-    Determina el rol de este servidor basándose en el estado del clúster.
+    Determina el rol usando algoritmo de bully mejorado.
+    Detecta múltiples primarios y fuerza elección.
     """
-    global server_role, current_primary_url, primary_since
+    global server_role, current_primary_url, primary_since, election_in_progress, last_election_time
     
-    # Buscar si hay un primario activo
-    active_primary = None
+    # Contar primarios activos
+    active_primaries = []
     for sid, info in cluster_state.items():
-        if sid == server_id:
-            continue
         if info.get("role") == "primary" and info.get("healthy"):
-            active_primary = (sid, info)
-            break
+            active_primaries.append((sid, info))
     
-    if active_primary:
-        # Ya hay un primario, soy backup
-        if server_role != "backup":
-            logger.info(f"[{server_id}] Primario activo: {active_primary[0]}. Configurándome como BACKUP")
+    # CASO 1: Múltiples primarios (split-brain)
+    if len(active_primaries) > 1:
+        logger.warning(f"[{server_id}] *** SPLIT-BRAIN DETECTADO: {len(active_primaries)} DNS PRIMARY ***")
+        # Forzar elección inmediatamente
+        await start_election()
+        return
+    
+    # CASO 2: Hay exactamente un primario y no soy yo
+    if len(active_primaries) == 1:
+        primary_id, primary_info = active_primaries[0]
+        
+        if primary_id != server_id:
+            # Hay otro primario, debo ser backup
+            if server_role == "primary":
+                logger.warning(f"[{server_id}] Detecté otro PRIMARY ({primary_id}). Iniciando elección...")
+                await start_election()
+            else:
+                # Ya soy backup, todo bien
+                if server_role != "backup":
+                    logger.info(f"[{server_id}] Primario activo: {primary_id}. Configurándome como BACKUP")
+                    server_role = "backup"
+                    primary_since = None
+                current_primary_url = primary_info.get("url")
+                await sync_from_primary()
+        else:
+            # Soy el único primario, mantener
+            pass
+    
+    # CASO 3: No hay primario
+    elif len(active_primaries) == 0:
+        if server_role != "primary":
+            logger.warning(f"[{server_id}] No hay primario. Iniciando elección...")
+            await start_election()
+
+
+async def start_election():
+    """
+    Inicia el algoritmo de bully para elección de líder DNS.
+    
+    Algoritmo:
+    1. Enviar ELECTION a todos los servidores con ID mayor
+    2. Si alguno responde OK, esperar que ellos resuelvan
+    3. Si nadie responde, me convierto en PRIMARY y anuncio COORDINATOR
+    """
+    global election_in_progress, server_role, primary_since, current_primary_url, last_election_time
+    
+    # Cooldown para evitar elecciones excesivas
+    now = time.time()
+    if election_in_progress:
+        logger.debug(f"[{server_id}] Elección ya en progreso, saltando...")
+        return
+    
+    if now - last_election_time < ELECTION_COOLDOWN:
+        logger.debug(f"[{server_id}] En cooldown de elección, saltando...")
+        return
+    
+    election_in_progress = True
+    last_election_time = now
+    
+    logger.info(f"[{server_id}] *** INICIANDO ELECCIÓN (BULLY ALGORITHM) ***")
+    
+    try:
+        # Obtener servidores con ID mayor (lexicográficamente)
+        higher_servers = []
+        for sid, info in cluster_state.items():
+            if sid == server_id:
+                continue
+            if not info.get("healthy"):
+                continue
+            if sid > server_id:  # Comparación lexicográfica
+                higher_servers.append((sid, info))
+        
+        if not higher_servers:
+            # Soy el de mayor ID, me convierto en coordinador
+            logger.info(f"[{server_id}] Soy el de mayor ID. Convirtiéndome en PRIMARY...")
+            await become_primary()
+            await announce_coordinator()
+            return
+        
+        # Enviar mensaje ELECTION a servidores con ID mayor
+        logger.info(f"[{server_id}] Enviando ELECTION a {len(higher_servers)} servidor(es) con ID mayor")
+        responses = await send_election_messages(higher_servers)
+        
+        if not responses:
+            # Nadie respondió, me convierto en coordinador
+            logger.info(f"[{server_id}] Sin respuestas. Convirtiéndome en PRIMARY...")
+            await become_primary()
+            await announce_coordinator()
+        else:
+            # Alguien respondió, ellos manejarán la elección
+            logger.info(f"[{server_id}] Recibí {len(responses)} respuesta(s). Esperando nuevo coordinador...")
             server_role = "backup"
             primary_since = None
-            current_primary_url = active_primary[1].get("url")
             
-            # Sincronizar inmediatamente
-            await sync_from_primary()
-    else:
-        # No hay primario activo
-        if server_role == "primary":
-            # Ya soy primario, mantener
-            pass
-        else:
-            # Verificar si debo promoverme
-            should_promote = True
-            
-            # Verificar si hay otro servidor que debería ser primario antes
-            for sid, info in cluster_state.items():
-                if sid == server_id:
-                    continue
-                if not info.get("healthy"):
-                    continue
-                    
-                # Si hay otro servidor que fue primario antes, esperar
-                other_primary_since = info.get("primary_since")
-                if other_primary_since and primary_since:
-                    if other_primary_since < primary_since:
-                        should_promote = False
-                        break
-            
-            if should_promote:
-                logger.warning(f"[{server_id}] No hay primario activo. PROMOVIENDO A PRIMARY...")
-                server_role = "primary"
-                primary_since = time.time()
-                current_primary_url = None
-                
-                # Actualizar mi entrada en cluster_state
-                if server_id in cluster_state:
-                    cluster_state[server_id]["role"] = "primary"
-                    cluster_state[server_id]["primary_since"] = primary_since
-                
-                # Notificar a otros
-                await notify_promotion()
-                
-                logger.info(f"[{server_id}] *** PROMOCIÓN COMPLETADA: Ahora soy el PRIMARY ***")
+            # Actualizar mi estado
+            if server_id in cluster_state:
+                cluster_state[server_id]["role"] = "backup"
+                cluster_state[server_id]["primary_since"] = None
+    
+    finally:
+        election_in_progress = False
 
 
-async def notify_promotion():
-    """Notifica a otros servidores que me he promovido a primario"""
+async def send_election_messages(higher_servers: List[tuple]) -> List[str]:
+    """
+    Envía mensajes ELECTION a servidores con ID mayor.
+    Retorna lista de server_ids que respondieron OK.
+    """
+    responses = []
+    
+    tasks = []
+    for sid, info in higher_servers:
+        url = info.get("url")
+        if url:
+            tasks.append(send_single_election(sid, url))
+    
+    if tasks:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        responses = [r for r in results if r and not isinstance(r, Exception)]
+    
+    return responses
+
+
+async def send_single_election(target_id: str, target_url: str) -> Optional[str]:
+    """Envía mensaje ELECTION a un servidor específico."""
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.post(f"{target_url}/election", json={
+                "candidate_id": server_id,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "ok":
+                    logger.debug(f"[{server_id}] {target_id} respondió OK a ELECTION")
+                    return target_id
+    except Exception as e:
+        logger.debug(f"[{server_id}] {target_id} no respondió a ELECTION: {e}")
+    
+    return None
+
+
+async def become_primary():
+    """Promueve este servidor a PRIMARY."""
+    global server_role, primary_since, current_primary_url
+    
+    logger.warning(f"[{server_id}] *** PROMOCIÓN A PRIMARY ***")
+    server_role = "primary"
+    primary_since = time.time()
+    current_primary_url = None
+    
+    # Actualizar mi entrada en cluster_state
+    if server_id in cluster_state:
+        cluster_state[server_id]["role"] = "primary"
+        cluster_state[server_id]["primary_since"] = primary_since
+
+
+async def announce_coordinator():
+    """Anuncia que soy el nuevo coordinador (PRIMARY) a todos."""
+    logger.info(f"[{server_id}] *** ANUNCIANDO COORDINATOR A TODOS ***")
+    
+    tasks = []
     for sid, info in cluster_state.items():
         if sid == server_id or not info.get("healthy"):
             continue
-            
+        
         url = info.get("url")
-        if not url:
+        if url:
+            tasks.append(send_coordinator_announcement(sid, url))
+    
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    
+    logger.info(f"[{server_id}] *** COORDINATOR ANUNCIADO ***")
+
+
+async def send_coordinator_announcement(target_id: str, target_url: str):
+    """Envía anuncio de coordinador a un servidor."""
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            await client.post(f"{target_url}/coordinator", json={
+                "coordinator_id": server_id,
+                "coordinator_url": f"http://{my_ip}:{dns_port}",
+                "primary_since": primary_since,
+                "timestamp": datetime.now().isoformat()
+            })
+            logger.debug(f"[{server_id}] Anuncio COORDINATOR enviado a {target_id}")
+    except Exception as e:
+        logger.debug(f"[{server_id}] Error enviando COORDINATOR a {target_id}: {e}")
+
+
+async def notify_promotion():
+    """DEPRECATED: Usar announce_coordinator en su lugar."""
+    await announce_coordinator()
+
+
+# ============================================================================
+# LEADER ELECTION & SPLIT-BRAIN RESOLUTION
+# ============================================================================
+
+def detect_multiple_primaries() -> List[str]:
+    """
+    Detecta si hay múltiples nodos storage con rol PRIMARY.
+    Retorna la lista de server_ids que se creen PRIMARY.
+    """
+    primaries = []
+    for sid, info in api_servers.items():
+        if info.get("role") == "PRIMARY":
+            primaries.append(sid)
+    
+    if len(primaries) > 1:
+        logger.warning(
+            f"[{server_id}] *** SPLIT-BRAIN DETECTADO: {len(primaries)} nodos PRIMARY: {primaries} ***"
+        )
+    
+    return primaries
+
+
+def elect_single_leader(primaries: List[str]) -> str:
+    """
+    Elige un único líder entre múltiples PRIMARY usando criterios determinísticos:
+    1. PRIMARY con epoch más alto (última promoción válida)
+    2. Si hay empate, el registrado primero (registered_at más antiguo)
+    3. Si aún hay empate, ID lexicográfico menor (determinista)
+    
+    Args:
+        primaries: Lista de server_ids que se creen PRIMARY
+        
+    Returns:
+        El server_id del líder elegido
+    """
+    if not primaries:
+        return None
+    
+    if len(primaries) == 1:
+        return primaries[0]
+    
+    # Construir lista de candidatos con sus métricas
+    candidates = []
+    for sid in primaries:
+        info = api_servers.get(sid)
+        if not info:
             continue
+        
+        candidates.append({
+            "server_id": sid,
+            "primary_epoch": info.get("primary_epoch", 0) or 0,
+            "registered_at": info.get("registered_at", datetime.now().isoformat()),
+            "last_heartbeat": info.get("last_heartbeat", ""),
+        })
+    
+    if not candidates:
+        return None
+    
+    # Ordenar por:
+    # 1. Epoch descendente (mayor epoch gana)
+    # 2. registered_at ascendente (más antiguo gana)
+    # 3. server_id ascendente (lexicográfico)
+    candidates.sort(
+        key=lambda x: (
+            -x["primary_epoch"],  # Mayor epoch primero
+            x["registered_at"],   # Más antiguo primero
+            x["server_id"]        # ID menor primero
+        )
+    )
+    
+    winner = candidates[0]
+    logger.info(
+        f"[{server_id}] Líder elegido: {winner['server_id']} "
+        f"(epoch={winner['primary_epoch']}, registered={winner['registered_at']})"
+    )
+    
+    return winner["server_id"]
+
+
+async def resolve_split_brain():
+    """
+    Resuelve situaciones de split-brain donde múltiples nodos se creen PRIMARY.
+    
+    Algoritmo:
+    1. Detectar múltiples PRIMARY
+    2. Elegir un único líder usando criterios determinísticos
+    3. Degradar (fence) a los perdedores a BACKUP
+    4. Notificar a los nodos afectados mediante propagación
+    
+    Esta función se ejecuta periódicamente y en eventos críticos (heartbeat, sync).
+    """
+    global last_split_brain_check, primary_epoch
+    
+    now = time.time()
+    
+    # Throttling: no verificar muy frecuentemente
+    if now - last_split_brain_check < SPLIT_BRAIN_CHECK_INTERVAL:
+        return
+    
+    last_split_brain_check = now
+    
+    async with api_servers_lock:
+        # Detectar múltiples PRIMARY
+        primaries = detect_multiple_primaries()
+        
+        if len(primaries) <= 1:
+            # No hay conflicto
+            return
+        
+        logger.warning(
+            f"[{server_id}] *** RESOLVIENDO SPLIT-BRAIN: {len(primaries)} PRIMARY detectados ***"
+        )
+        
+        # Elegir líder único
+        winner_id = elect_single_leader(primaries)
+        
+        if not winner_id:
+            logger.error(f"[{server_id}] No se pudo elegir líder en split-brain resolution")
+            return
+        
+        # Degradar perdedores a BACKUP
+        losers = [sid for sid in primaries if sid != winner_id]
+        
+        for loser_id in losers:
+            if loser_id not in api_servers:
+                continue
             
-        try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                await client.post(f"{url}/notify-new-primary", json={
-                    "new_primary_id": server_id,
-                    "new_primary_url": f"http://{my_ip}:{dns_port}",
-                    "primary_since": primary_since,
-                    "timestamp": datetime.now().isoformat()
-                })
-                logger.info(f"[{server_id}] Notificación de promoción enviada a {sid}")
-        except Exception as e:
-            logger.error(f"[{server_id}] Error notificando a {sid}: {e}")
+            logger.warning(
+                f"[{server_id}] *** FENCING: Degradando {loser_id} de PRIMARY a BACKUP ***"
+            )
+            
+            # Cambiar rol a BACKUP
+            api_servers[loser_id]["role"] = "BACKUP"
+            api_servers[loser_id]["primary_epoch"] = None
+            api_servers[loser_id]["lease_expires_at"] = None
+            
+            # Propagar cambio a otros DNS (sin await para no bloquear)
+            asyncio.create_task(
+                propagate_service_registration(
+                    "api_server",
+                    loser_id,
+                    dict(api_servers[loser_id])
+                )
+            )
+        
+        # Asegurar que el ganador tenga epoch actualizado
+        if winner_id in api_servers:
+            winner_epoch = api_servers[winner_id].get("primary_epoch", 0)
+            
+            # Incrementar epoch global si es necesario
+            if winner_epoch is None or winner_epoch < primary_epoch:
+                primary_epoch += 1
+                api_servers[winner_id]["primary_epoch"] = primary_epoch
+                
+                # Renovar lease del ganador
+                now_dt = datetime.now()
+                lease_expires = now_dt.timestamp() + LEASE_DURATION
+                api_servers[winner_id]["lease_expires_at"] = datetime.fromtimestamp(lease_expires).isoformat()
+                
+                logger.info(
+                    f"[{server_id}] Ganador {winner_id} actualizado con epoch={primary_epoch}"
+                )
+            else:
+                # El epoch del ganador es el más alto, actualizamos el global
+                primary_epoch = winner_epoch
+            
+            # Propagar estado del ganador
+            asyncio.create_task(
+                propagate_service_registration(
+                    "api_server",
+                    winner_id,
+                    dict(api_servers[winner_id])
+                )
+            )
+        
+        logger.warning(
+            f"[{server_id}] *** SPLIT-BRAIN RESUELTO: {winner_id} es el PRIMARY único, "
+            f"{len(losers)} nodo(s) degradado(s) ***"
+        )
 
 
 # ============================================================================
@@ -1610,6 +2074,56 @@ async def sync_loop():
             sync_status["is_syncing"] = False
 
 
+async def dns_split_brain_monitor_loop():
+    """
+    Loop de monitoreo y resolución de split-brain en servidores DNS.
+    Detecta múltiples PRIMARY DNS y fuerza elección mediante bully algorithm.
+    """
+    logger.info(f"[{server_id}] Iniciando monitor de split-brain DNS (intervalo: {SPLIT_BRAIN_CHECK_INTERVAL}s)")
+    
+    while True:
+        try:
+            await asyncio.sleep(SPLIT_BRAIN_CHECK_INTERVAL)
+            
+            # Contar cuántos DNS se creen PRIMARY
+            dns_primaries = []
+            for sid, info in cluster_state.items():
+                if info.get("role") == "primary" and info.get("healthy"):
+                    dns_primaries.append(sid)
+            
+            # Si hay múltiples primarios, forzar elección
+            if len(dns_primaries) > 1:
+                logger.warning(
+                    f"[{server_id}] *** DNS SPLIT-BRAIN: {len(dns_primaries)} PRIMARY detectados: {dns_primaries} ***"
+                )
+                # Forzar elección inmediatamente
+                await start_election()
+            
+        except Exception as e:
+            logger.error(f"[{server_id}] Error en DNS split-brain monitor loop: {e}")
+
+
+async def split_brain_monitor_loop():
+    """
+    Loop de monitoreo y resolución automática de split-brain para storage nodes.
+    Ejecuta verificaciones periódicas independientes de otros eventos.
+    """
+    logger.info(f"[{server_id}] Iniciando monitor de split-brain STORAGE (intervalo: {SPLIT_BRAIN_CHECK_INTERVAL}s)")
+    
+    while True:
+        try:
+            await asyncio.sleep(SPLIT_BRAIN_CHECK_INTERVAL)
+            
+            # Forzar verificación sin throttling (ya que el loop controla el intervalo)
+            global last_split_brain_check
+            last_split_brain_check = 0  # Reset para forzar verificación
+            
+            await resolve_split_brain()
+            
+        except Exception as e:
+            logger.error(f"[{server_id}] Error en split-brain monitor loop: {e}")
+
+
 # ============================================================================
 # STARTUP
 # ============================================================================
@@ -1664,6 +2178,8 @@ async def startup_event():
     asyncio.create_task(discovery_loop())
     asyncio.create_task(health_check_loop())
     asyncio.create_task(sync_loop())
+    asyncio.create_task(dns_split_brain_monitor_loop())  # Monitor de split-brain para DNS
+    asyncio.create_task(split_brain_monitor_loop())  # Monitor de split-brain para storage nodes
     
     logger.info(f"[{server_id}] DNS Service HA iniciado. Rol: {server_role}")
 
