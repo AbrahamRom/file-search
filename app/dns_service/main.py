@@ -545,6 +545,12 @@ async def register_api_server(request: APIServerRegisterRequest, background_task
             request.server_id, 
             server_info
         )
+        # Notify the storage node of its assigned role so it can apply immediately
+        background_tasks.add_task(
+            propagate_role_to_storage,
+            request.server_id,
+            server_info,
+        )
         
         # Obtener info del PRIMARY actual para que los backups sepan a quién sincronizar
         primary_info = None
@@ -712,6 +718,12 @@ async def api_server_heartbeat(request: APIServerHeartbeatRequest, background_ta
                     sid,
                     server_info,
                 )
+                # También notificar al storage node para que aplique el rol inmediatamente
+                background_tasks.add_task(
+                    propagate_role_to_storage,
+                    sid,
+                    server_info,
+                )
         
         # Obtener epoch y lease del servidor actual para incluirlo en la respuesta
         current_server_info = api_servers.get(request.server_id, {})
@@ -823,6 +835,11 @@ async def resolve_api_server():
                 f"[{server_id}] *** FAILOVER AUTOMÁTICO: Promoviendo {best_backup_sid} "
                 f"({best_backup['ip']}:{best_backup['port']}) a PRIMARY (epoch={primary_epoch}) ***"
             )
+            # Notify the promoted storage node so it can apply role immediately
+            try:
+                asyncio.create_task(propagate_role_to_storage(best_backup_sid, api_servers[best_backup_sid]))
+            except Exception:
+                logger.debug(f"[{server_id}] Could not schedule role notification for {best_backup_sid}")
             
             return APIServerResolveResponse(
                 server_id=best_backup_sid,
@@ -1393,6 +1410,41 @@ async def propagate_service_registration(service_type: str, service_id: str, ser
                     logger.debug(f"[{server_id}] Registro de {service_type}/{service_id} propagado a {sid}")
         except Exception as e:
             logger.debug(f"[{server_id}] Error propagando registro a {sid}: {e}")
+
+
+async def propagate_role_to_storage(service_id: str, service_info: dict):
+    """
+    Notify a storage node about its assigned role.
+    This posts to the storage node endpoint `/internal/set_role` so the node
+    updates its NodeManager state without waiting for the next heartbeat.
+    """
+    ip = service_info.get("ip")
+    port = service_info.get("port")
+    if not ip or not port:
+        return
+
+    url = f"http://{ip}:{port}/internal/set_role"
+    payload = {
+        "role": service_info.get("role"),
+        "primary_info": {
+            "server_id": service_id,
+            "ip": ip,
+            "port": port,
+            "url": f"http://{ip}:{port}"
+        } if service_info.get("role") == "PRIMARY" else None,
+        "primary_epoch": service_info.get("primary_epoch"),
+        "lease_expires_at": service_info.get("lease_expires_at"),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code == 200:
+                logger.info(f"[{server_id}] Notified storage {service_id} of role {service_info.get('role')}")
+            else:
+                logger.debug(f"[{server_id}] Storage {service_id} responded {resp.status_code} to role notification: {resp.text}")
+    except Exception as e:
+        logger.debug(f"[{server_id}] Error notifying storage {service_id}: {e}")
 
 
 async def propagate_to_backups(hostname: str, ip: str):

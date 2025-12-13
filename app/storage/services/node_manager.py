@@ -354,6 +354,47 @@ class NodeManager:
                 self._on_become_backup()
             except Exception as e:
                 logger.error(f"[NodeManager] Error in on_become_backup callback: {e}")
+
+    def apply_dns_assignment(
+        self,
+        assigned_role: str,
+        primary_info: Optional[Dict] = None,
+        primary_epoch: Optional[int] = None,
+        lease_expires_at: Optional[str] = None,
+    ) -> None:
+        """
+        Apply a role assignment coming from the DNS service.
+        This centralizes the logic of updating internal state based on DNS decisions
+        and triggers callbacks if the role changed.
+        """
+        old_role = self._role
+
+        # Normalize role values
+        assigned_role = assigned_role.upper() if assigned_role else "UNKNOWN"
+
+        self._role = assigned_role
+        self._primary_info = primary_info
+
+        if assigned_role == "PRIMARY":
+            # Update epoch and lease expiry if provided
+            if primary_epoch is not None:
+                self._primary_epoch = primary_epoch
+            if lease_expires_at:
+                try:
+                    dt = datetime.fromisoformat(lease_expires_at)
+                    self._lease_expires_at = dt.timestamp()
+                except Exception:
+                    # ignore parse errors and keep previous lease
+                    logger.warning("[NodeManager] Could not parse lease_expires_at from DNS assignment")
+        else:
+            # If not primary, clear epoch and lease
+            self._primary_epoch = None
+            self._lease_expires_at = None
+
+        # Trigger callback if role changed
+        if old_role != self._role:
+            logger.info(f"[NodeManager] Role changed via DNS: {old_role} -> {self._role}")
+            self._notify_role_change(old_role)
     
     async def heartbeat_loop(self):
         """
