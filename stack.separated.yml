@@ -143,6 +143,7 @@ services:
       - DNS_SERVICE_PORT=5353
       - HEARTBEAT_INTERVAL=5
       - SYNC_INTERVAL=10
+      - SYNC_TIMEOUT=30
     volumes:
       - type: bind
         source: ${FILES_SOURCE:-/srv/file-search/files}
@@ -184,6 +185,7 @@ services:
       - DNS_SERVICE_PORT=5353
       - HEARTBEAT_INTERVAL=5
       - SYNC_INTERVAL=10
+      - SYNC_TIMEOUT=30
     volumes:
       - type: bind
         source: ${FILES_SOURCE:-/srv/file-search/files}
@@ -209,7 +211,6 @@ services:
       - target: 8000
         published: 9001
         mode: ingress
-
   storage_3:
     image: file-search-storage:latest
     environment:
@@ -225,6 +226,8 @@ services:
       - DNS_SERVICE_PORT=5353
       - HEARTBEAT_INTERVAL=5
       - SYNC_INTERVAL=10
+      - SYNC_TIMEOUT=30
+    volumes:_INTERVAL=10
     volumes:
       - type: bind
         source: ${FILES_SOURCE:-/srv/file-search/files}

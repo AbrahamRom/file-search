@@ -201,6 +201,7 @@ docker run -d \
   -e DNS_SERVICE_PORT=5353 \
   -e HEARTBEAT_INTERVAL=5 \
   -e SYNC_INTERVAL=10 \
+  -e SYNC_TIMEOUT=30 \
   file-search-storage:latest
 ```
 
@@ -300,6 +301,7 @@ docker run -d \
   -e DNS_SERVICE_PORT=5353 \
   -e HEARTBEAT_INTERVAL=5 \
   -e SYNC_INTERVAL=10 \
+  -e SYNC_TIMEOUT=30 \
   file-search-storage:latest
 ```
 
@@ -326,6 +328,7 @@ docker run -d \
   -e DNS_SERVICE_PORT=5353 \
   -e HEARTBEAT_INTERVAL=5 \
   -e SYNC_INTERVAL=10 \
+  -e SYNC_TIMEOUT=30 \
   file-search-storage:latest
 ```
 
@@ -366,7 +369,6 @@ docker run -d \
   -e TARGET_SERVICE_PORT=8000 \
   -e API_BASE_URL=http://processor_1:8000 \
   -e BROWSER_API_URL=http://<IP_MANAGER>:8000 \
-  -e BROWSER_API_URL_WORKER=http://<IP_WORKER>:8001 \
   -e MAX_RETRIES=3 \
   -e RETRY_DELAY=0.5 \
   file-search-client:latest
@@ -374,7 +376,6 @@ docker run -d \
 
 > **Nota:** Reemplaza `<IP_MANAGER>` y `<IP_WORKER>` con las IPs reales. 
 > - `BROWSER_API_URL` se usa para descargas cuando el Manager está disponible
-> - `BROWSER_API_URL_WORKER` es el fallback cuando hay partición de red y solo el Worker está disponible
 
 ---
 
@@ -572,6 +573,7 @@ docker run -d --name storage_1 --hostname storage_1 \
   -e FILES_SOURCE_PATH=/tmp/source_files -e LOG_DIR=/app/logs \
   -e DB_PATH=/app/data/storage.db -e DNS_ALIAS=dns \
   -e DNS_SERVICE_PORT=5353 -e HEARTBEAT_INTERVAL=5 -e SYNC_INTERVAL=10 \
+  -e SYNC_TIMEOUT=30 \
   file-search-storage:latest
 
 echo "Storage_1 iniciado"
@@ -639,6 +641,7 @@ docker run -d --name storage_2 --hostname storage_2 \
   -e FILES_SOURCE_PATH=/tmp/source_files -e LOG_DIR=/app/logs \
   -e DB_PATH=/app/data/storage.db -e DNS_ALIAS=dns \
   -e DNS_SERVICE_PORT=5353 -e HEARTBEAT_INTERVAL=5 -e SYNC_INTERVAL=10 \
+  -e SYNC_TIMEOUT=30 \
   file-search-storage:latest
 
 echo "Storage_2 iniciado"
@@ -653,6 +656,7 @@ docker run -d --name storage_3 --hostname storage_3 \
   -e FILES_SOURCE_PATH=/tmp/source_files -e LOG_DIR=/app/logs \
   -e DB_PATH=/app/data/storage.db -e DNS_ALIAS=dns \
   -e DNS_SERVICE_PORT=5353 -e HEARTBEAT_INTERVAL=5 -e SYNC_INTERVAL=10 \
+  -e SYNC_TIMEOUT=30 \
   file-search-storage:latest
 
 echo "Storage_3 iniciado"
@@ -671,9 +675,6 @@ docker run -d --name processor_2 --hostname processor_2 \
 
 echo "Processor_2 iniciado"
 
-# Obtener IP del Worker para BROWSER_API_URL_WORKER
-WORKER_IP=$(hostname -I | awk '{print $1}')
-
 # Client
 docker run -d --name client --hostname client \
   --network file_search_net \
@@ -682,7 +683,6 @@ docker run -d --name client --hostname client \
   -e TARGET_SERVICE_NAME=processor -e TARGET_SERVICE_PORT=8000 \
   -e API_BASE_URL=http://processor_1:8000 \
   -e BROWSER_API_URL=http://${MANAGER_IP}:8000 \
-  -e BROWSER_API_URL_WORKER=http://${WORKER_IP}:8001 \
   -e MAX_RETRIES=3 -e RETRY_DELAY=0.5 \
   file-search-client:latest
 
