@@ -366,13 +366,89 @@ class StorageClient:
         return response.json()
     
     async def download_file(self, file_id: str) -> bytes:
-        """Download file content."""
-        response = await self._request_with_dns_failover(
-            "GET",
-            f"/files/{file_id}/download",
-        )
-        response.raise_for_status()
-        return response.content
+        """
+        Download file content with multi-storage fallback.
+        
+        If the primary storage returns 404 "File not available on disk",
+        tries to download from other storage nodes (file might exist there
+        after a network partition where files were uploaded to different nodes).
+        """
+        await self._ensure_client()
+        
+        # First try: normal request with DNS failover
+        try:
+            response = await self._request_with_dns_failover(
+                "GET",
+                f"/files/{file_id}/download",
+            )
+            
+            # Check for "file not on disk" error (404 with specific message)
+            if response.status_code == 404:
+                try:
+                    error_detail = response.json().get("detail", "")
+                    if "not available on disk" in error_detail.lower():
+                        logger.warning(
+                            f"[DOWNLOAD] File {file_id} not on disk in primary, trying other storages..."
+                        )
+                        # Fall through to multi-storage fallback
+                        raise StorageRequestError(
+                            f"File not available on disk: {file_id}",
+                            self._current_storage_id or "unknown",
+                            404
+                        )
+                except (ValueError, AttributeError):
+                    pass
+                response.raise_for_status()
+            
+            response.raise_for_status()
+            return response.content
+            
+        except StorageRequestError as e:
+            # Only do multi-storage fallback for "not on disk" errors
+            if "not available on disk" not in str(e).lower():
+                raise
+            
+            # Multi-storage fallback: try all storage nodes
+            logger.info(f"[DOWNLOAD] Attempting multi-storage fallback for {file_id}")
+            
+            tried_storages = {self._current_storage_id}
+            all_storages = self.dns_client.list_storage_servers()
+            
+            for storage_info in all_storages:
+                storage_id = storage_info.get("server_id")
+                storage_url = storage_info.get("url")
+                
+                if not storage_url or storage_id in tried_storages:
+                    continue
+                
+                tried_storages.add(storage_id)
+                
+                try:
+                    logger.info(f"[DOWNLOAD] Trying storage {storage_id} at {storage_url}")
+                    
+                    download_url = f"{storage_url}/files/{file_id}/download"
+                    response = await self._http_client.get(download_url)
+                    
+                    if response.status_code == 200:
+                        logger.info(f"[DOWNLOAD] Successfully downloaded from {storage_id}")
+                        return response.content
+                    elif response.status_code == 404:
+                        logger.debug(f"[DOWNLOAD] File not found on {storage_id}")
+                        continue
+                    else:
+                        logger.warning(f"[DOWNLOAD] Error from {storage_id}: {response.status_code}")
+                        continue
+                        
+                except Exception as fallback_error:
+                    logger.warning(f"[DOWNLOAD] Failed to reach {storage_id}: {fallback_error}")
+                    continue
+            
+            # All storages tried, file not found anywhere
+            raise StorageRequestError(
+                f"File {file_id} not available on disk in any storage node",
+                "all",
+                404
+            )
     
     async def upload_file(
         self,

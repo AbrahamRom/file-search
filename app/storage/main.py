@@ -29,16 +29,55 @@ from .services.sync_service import get_sync_service, SyncService
 node_manager: NodeManager = get_node_manager()
 sync_service: SyncService = get_sync_service()
 
+# Task handle for sync loop (to avoid starting multiple)
+_sync_task: asyncio.Task = None
+
 
 def on_become_primary():
     """Callback when this node becomes PRIMARY."""
+    global _sync_task
     logger.info("*** THIS NODE IS NOW PRIMARY ***")
     sync_service.stop()
+    _sync_task = None
 
 
 def on_become_backup():
-    """Callback when this node becomes BACKUP."""
+    """
+    Callback when this node becomes BACKUP.
+    Starts sync loop and triggers immediate full sync for reconciliation.
+    """
+    global _sync_task
     logger.info("*** THIS NODE IS NOW BACKUP - Starting synchronization ***")
+    
+    # Schedule immediate sync and start sync loop
+    async def _start_backup_sync():
+        global _sync_task
+        # First, do an immediate full sync for reconciliation
+        primary_url = node_manager.primary_url
+        if primary_url:
+            logger.info("[RECONCILE] Triggering immediate full sync after role change to BACKUP")
+            sync_service.set_primary_url(primary_url)
+            await sync_service.full_sync()
+        
+        # Then start the sync loop if not already running
+        if _sync_task is None or _sync_task.done():
+            _sync_task = asyncio.create_task(
+                sync_service.sync_loop(
+                    get_primary_url_fn=lambda: node_manager.primary_url
+                )
+            )
+            logger.info("Sync loop started for BACKUP node")
+    
+    # Schedule the async work
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(_start_backup_sync())
+        else:
+            loop.run_until_complete(_start_backup_sync())
+    except RuntimeError:
+        # No event loop, will be handled by startup
+        pass
 
 
 # Register callbacks
@@ -57,6 +96,8 @@ async def startup_cluster():
     3. Start heartbeat loop
     4. If BACKUP, start sync loop
     """
+    global _sync_task
+    
     logger.info("=" * 60)
     logger.info("Starting Storage Node in cluster mode...")
     logger.info(f"Storage ID: {node_manager.server_id}")
@@ -73,7 +114,14 @@ async def startup_cluster():
         
         # If we're BACKUP, start synchronization
         if node_manager.is_backup:
-            asyncio.create_task(
+            # Immediate full sync for initial reconciliation
+            primary_url = node_manager.primary_url
+            if primary_url:
+                logger.info("[RECONCILE] Initial full sync as BACKUP node")
+                sync_service.set_primary_url(primary_url)
+                await sync_service.full_sync()
+            
+            _sync_task = asyncio.create_task(
                 sync_service.sync_loop(
                     get_primary_url_fn=lambda: node_manager.primary_url
                 )

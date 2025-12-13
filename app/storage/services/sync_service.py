@@ -290,9 +290,120 @@ class SyncService:
         
         return {"downloaded": downloaded, "pushed": pushed, "conflicted": conflicted, "errors": errors}
     
+    async def reconcile_missing_files(self) -> Dict[str, int]:
+        """
+        Reconcile files that are in DB but missing on disk.
+        
+        After a network partition, the DB may have been synced but physical files
+        might be missing. This method attempts to download them from ANY available
+        storage node (not just PRIMARY).
+        
+        Returns:
+            Dict with downloaded count and errors
+        """
+        import socket
+        from ..db.crud import list_files
+        
+        downloaded = 0
+        errors = 0
+        
+        try:
+            # Get all files from DB
+            db_files = list_files()
+            
+            # Find files missing on disk
+            missing_files = []
+            for db_record in db_files:
+                file_path = Path(db_record["path"])
+                if not file_path.exists():
+                    relative_path = file_path.relative_to(FILES_ROOT).as_posix() if str(file_path).startswith(str(FILES_ROOT)) else db_record["name"]
+                    missing_files.append({
+                        "file_id": db_record["file_id"],
+                        "path": file_path,
+                        "relative_path": relative_path,
+                    })
+            
+            if not missing_files:
+                return {"downloaded": 0, "errors": 0, "missing": 0}
+            
+            logger.info(f"[SyncService] Found {len(missing_files)} files in DB but missing on disk")
+            
+            # Discover storage nodes via DNS
+            dns_alias = os.getenv("DNS_ALIAS", "dns")
+            dns_port = int(os.getenv("DNS_SERVICE_PORT", 5353))
+            
+            storage_nodes = []
+            try:
+                results = socket.getaddrinfo(dns_alias, dns_port, socket.AF_INET, socket.SOCK_STREAM)
+                dns_ips = list(set(result[4][0] for result in results))
+                
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    for dns_ip in dns_ips:
+                        try:
+                            response = await client.get(f"http://{dns_ip}:{dns_port}/server/list")
+                            if response.status_code == 200:
+                                storage_nodes = response.json().get("servers", [])
+                                break
+                        except Exception:
+                            continue
+            except Exception as e:
+                logger.warning(f"[SyncService] Could not discover storage nodes: {e}")
+            
+            # Also try the PRIMARY URL we know
+            if self._primary_url:
+                primary_found = any(s.get("url") == self._primary_url for s in storage_nodes)
+                if not primary_found:
+                    storage_nodes.insert(0, {"url": self._primary_url, "server_id": "primary"})
+            
+            # Filter out self
+            my_id = os.getenv("STORAGE_ID", os.getenv("SERVER_ID", ""))
+            other_nodes = [s for s in storage_nodes if s.get("server_id") != my_id]
+            
+            if not other_nodes:
+                logger.warning("[SyncService] No other storage nodes available for reconciliation")
+                return {"downloaded": 0, "errors": len(missing_files), "missing": len(missing_files)}
+            
+            # Try to download each missing file from any node
+            async with httpx.AsyncClient(timeout=SYNC_TIMEOUT) as client:
+                for missing in missing_files:
+                    file_id = missing["file_id"]
+                    target_path = missing["path"]
+                    
+                    for node in other_nodes:
+                        node_url = node.get("url")
+                        if not node_url:
+                            continue
+                        
+                        try:
+                            response = await client.get(f"{node_url}/files/{file_id}/download")
+                            
+                            if response.status_code == 200:
+                                target_path.parent.mkdir(parents=True, exist_ok=True)
+                                with open(target_path, "wb") as f:
+                                    f.write(response.content)
+                                downloaded += 1
+                                logger.info(f"[SyncService] Reconciled {missing['relative_path']} from {node.get('server_id', node_url)}")
+                                break
+                            elif response.status_code == 404:
+                                continue
+                        except Exception as e:
+                            logger.debug(f"[SyncService] Failed to get {file_id} from {node_url}: {e}")
+                            continue
+                    else:
+                        errors += 1
+                        logger.warning(f"[SyncService] Could not reconcile {missing['relative_path']} from any node")
+            
+            if downloaded > 0 or errors > 0:
+                logger.info(f"[SyncService] Reconciliation: {downloaded} recovered, {errors} still missing")
+                
+        except Exception as e:
+            logger.error(f"[SyncService] Error in reconciliation: {e}")
+        
+        return {"downloaded": downloaded, "errors": errors, "missing": len(missing_files) if 'missing_files' in dir() else 0}
+    
     async def full_sync(self) -> bool:
         """
-        Perform a full sync (DB + files).
+        Perform a full sync (DB + files) and reconcile missing files.
         """
         if self._is_syncing:
             logger.debug("[SyncService] Sync already in progress")
@@ -310,10 +421,14 @@ class SyncService:
             if not db_ok:
                 success = False
             
-            # 2. Sync files
+            # 2. Sync files from PRIMARY
             file_result = await self.sync_files()
             if file_result["errors"] > 0:
                 success = False
+            
+            # 3. Reconcile any missing files (try ALL storage nodes)
+            # This catches files that PRIMARY doesn't have but other nodes do
+            reconcile_result = await self.reconcile_missing_files()
             
             # Update stats
             self._last_sync = datetime.now()
@@ -322,7 +437,8 @@ class SyncService:
             elapsed = (self._last_sync - start_time).total_seconds()
             logger.info(
                 f"[SyncService] Sync #{self._sync_count} completed in {elapsed:.2f}s. "
-                f"DB: {'OK' if db_ok else 'FAIL'}, Files: {file_result['downloaded']} downloaded"
+                f"DB: {'OK' if db_ok else 'FAIL'}, Files: {file_result['downloaded']} downloaded, "
+                f"Reconciled: {reconcile_result['downloaded']} recovered"
             )
             
         except Exception as e:
