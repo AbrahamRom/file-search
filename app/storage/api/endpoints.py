@@ -25,6 +25,7 @@ from pathlib import Path
 try:
     fastapi = importlib.import_module("fastapi")
     pydantic = importlib.import_module("pydantic")
+    cors_middleware = importlib.import_module("fastapi.middleware.cors")
 except ModuleNotFoundError as exc:
     raise SystemExit(
         "Missing required dependencies. Install fastapi and pydantic."
@@ -41,6 +42,7 @@ BaseModel = pydantic.BaseModel
 UploadFile = fastapi.UploadFile
 File = fastapi.File
 Form = fastapi.Form
+CORSMiddleware = cors_middleware.CORSMiddleware
 
 from ..db.crud import (
     delete_file,
@@ -65,6 +67,19 @@ app = FastAPI(
     title="Storage Node API",
     version="1.0.0",
     description="Internal API for Storage Node operations",
+)
+
+# ============================================================================
+# CORS CONFIGURATION
+# ============================================================================
+# Permitir CORS para que el navegador pueda descargar archivos
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # En producción, especificar los orígenes permitidos
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Disposition"],  # Importante para descargas
 )
 
 

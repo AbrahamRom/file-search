@@ -108,7 +108,16 @@ def render_results(
 	build_download_url: Callable[[dict], str],
 	timezone_label: str = "UTC",
 ) -> None:
-	"""Muestra la lista de resultados con botones de descarga."""
+	"""
+	Muestra la lista de resultados con enlaces de descarga.
+	
+	NOTA: Los enlaces usan el atributo 'download' HTML5, pero este solo funciona
+	para same-origin. Para cross-origin (Streamlit en 8501, API en 8000), el 
+	navegador ignora el atributo 'download' y abre el archivo en una nueva pestaña.
+	
+	Sin embargo, como el servidor envía el header 'Content-Disposition: attachment',
+	el navegador debería descargar el archivo automáticamente en lugar de mostrarlo.
+	"""
 
 	if not records:
 		st.info("No se encontraron archivos para los filtros seleccionados.")
@@ -126,8 +135,20 @@ def render_results(
 		cols[0].markdown(f"**{record['name']}**\n\n`{record['size']} bytes`")
 		cols[1].code(record["path"], language="text")
 		cols[2].markdown(str(record.get("last_modified", "-")))
+		
+		# Construir URL de descarga
 		download_url = build_download_url(record)
-		cols[3].markdown(f"[⬇ Descarga]({download_url})")
+		file_name = record.get("name", "download")
+		
+		# Usar enlace HTML simple que abre en nueva pestaña
+		# El servidor envía Content-Disposition: attachment, por lo que el navegador
+		# descargará el archivo automáticamente
+		cols[3].markdown(
+			f'<a href="{download_url}" target="_blank" rel="noopener noreferrer" '
+			f'style="text-decoration: none; padding: 4px 8px; background-color: #f0f2f6; '
+			f'border-radius: 4px; display: inline-block;">⬇️ Descargar</a>',
+			unsafe_allow_html=True
+		)
 
 
 def pagination_controls(

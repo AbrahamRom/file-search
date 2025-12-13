@@ -272,6 +272,27 @@ def upload_file_to_server(uploaded_file, folder: str = "") -> dict:
         raise
 
 
+def download_file_from_server(file_id: str, file_name: str) -> bytes:
+    """
+    Descarga un archivo del servidor usando el endpoint /files/{file_id}/download.
+    
+    Args:
+        file_id: ID del archivo a descargar
+        file_name: Nombre del archivo (para logging)
+    
+    Returns:
+        Contenido del archivo en bytes
+    """
+    try:
+        logger.info(f"Descargando archivo: {file_name} (ID: {file_id})")
+        response = make_request_with_retry("GET", f"files/{file_id}/download")
+        return response.content
+    
+    except Exception as e:
+        logger.error(f"Error al descargar archivo {file_name}: {e}")
+        raise
+
+
 def humanize_datetime(value: str) -> str:
     try:
         value = value.replace("Z", "+00:00")

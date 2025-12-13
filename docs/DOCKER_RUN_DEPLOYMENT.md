@@ -368,7 +368,7 @@ docker run -d \
   -e TARGET_SERVICE_NAME=processor \
   -e TARGET_SERVICE_PORT=8000 \
   -e API_BASE_URL=http://processor_1:8000 \
-  -e BROWSER_API_URL=http://<IP_MANAGER>:8000 \
+  -e BROWSER_API_URL=http://192.168.174.12:8000 \
   -e MAX_RETRIES=3 \
   -e RETRY_DELAY=0.5 \
   file-search-client:latest
