@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 from typing import Dict, Optional, Any, List
 
+from .ip_discovery import DiscoveryManager
+
 try:
     import requests
 except ImportError:
@@ -56,6 +58,10 @@ class DNSClientHA:
         self._cache_file = self._cache_dir / "dns_cache.json"
         self._ensure_cache_dir()
         self._load_persistent_cache()
+        
+        # Discovery por rango de IPs (fallback)
+        self._ip_discovery = DiscoveryManager(dns_port=dns_port)
+        self._network_hint = os.getenv("NETWORK_CIDR", None)
         
         # Lock para thread-safety
         self._lock = threading.Lock()
@@ -108,50 +114,117 @@ class DNSClientHA:
     
     def _bootstrap(self) -> None:
         """
-        Inicializa el cliente DNS:
-        1. Descubre servidores DNS usando el alias de Docker
-        2. Obtiene la lista completa de servidores del primero que responda
+        Inicializa el cliente DNS con estrategia híbrida:
+        1. Intenta descubrir via alias DNS de Docker
+        2. Si falla, usa descubrimiento por rango de IPs
         """
         logger.info(f"[DNSClientHA] Iniciando bootstrap con alias '{self.dns_alias}'...")
         
-        # Descubrir IPs via alias DNS de Docker
+        # Método 1: Descubrir IPs via alias DNS de Docker
         discovered_ips = self._discover_via_alias()
         
-        if not discovered_ips:
-            logger.warning(f"[DNSClientHA] No se encontraron servidores DNS via alias '{self.dns_alias}'")
-            self._bootstrapped = False
+        if discovered_ips:
+            logger.info(f"[DNSClientHA] IPs descubiertas via alias: {discovered_ips}")
+            
+            # Intentar obtener la lista completa de un servidor
+            for ip in discovered_ips:
+                if self._fetch_server_list(ip):
+                    self._bootstrapped = True
+                    logger.info(f"[DNSClientHA] Bootstrap exitoso. {len(self._dns_servers)} servidores conocidos")
+                    return
+            
+            # Si no pudimos obtener la lista, usar las IPs descubiertas directamente
+            logger.warning("[DNSClientHA] No se pudo obtener lista de servidores. Usando IPs descubiertas directamente.")
+            with self._lock:
+                self._dns_servers = [
+                    {
+                        "ip": ip,
+                        "url": f"http://{ip}:{self.dns_port}",
+                        "server_id": f"dns_{ip}",
+                        "role": "unknown",
+                        "healthy": True,
+                        "primary_since": None
+                    }
+                    for ip in discovered_ips
+                ]
+            self._bootstrapped = True
             return
         
-        logger.info(f"[DNSClientHA] IPs descubiertas: {discovered_ips}")
+        # Método 2: Fallback a descubrimiento por rango de IPs
+        logger.warning("[DNSClientHA] Alias DNS de Docker no disponible. Intentando descubrimiento por rango de IPs...")
+        if self._bootstrap_via_ip_range():
+            return
         
-        # Intentar obtener la lista completa de un servidor
-        for ip in discovered_ips:
-            if self._fetch_server_list(ip):
-                self._bootstrapped = True
-                logger.info(f"[DNSClientHA] Bootstrap exitoso. {len(self._dns_servers)} servidores conocidos")
-                return
+        # Si todo falla, quedar en estado no bootstrapeado (reintentar en resolve())
+        logger.error("[DNSClientHA] Bootstrap completamente fallido. Se reintentará en las resoluciones.")
+        self._bootstrapped = False
         
-        # Si no pudimos obtener la lista, usar las IPs descubiertas directamente
-        logger.warning("[DNSClientHA] No se pudo obtener lista de servidores. Usando IPs descubiertas directamente.")
-        with self._lock:
-            self._dns_servers = [
-                {
+    
+    def _bootstrap_via_ip_range(self) -> bool:
+        """
+        Fallback: Descubre servidores DNS usando escaneo de rango de IPs.
+        Se ejecuta cuando Docker DNS alias falla.
+        """
+        logger.warning("[DNSClientHA] Fallback a descubrimiento por rango de IPs...")
+        
+        try:
+            discovered = self._ip_discovery.discover_dns_servers(
+                network_hint=self._network_hint,
+                force_refresh=True,
+                use_ping_sweep=False  # Escaneo rápido sin ping sweep
+            )
+            
+            if not discovered:
+                logger.warning("[DNSClientHA] No se encontraron servidores DNS por escaneo de IPs")
+                return False
+            
+            logger.info(f"[DNSClientHA] Descubiertos {len(discovered)} servidores DNS por escaneo de IPs")
+            
+            # Procesar resultados del descubrimiento
+            new_servers = []
+            for srv in discovered:
+                ip = srv.get("ip", "")
+                server_id = srv.get("server_id", f"dns_{ip}")
+                
+                server_entry = {
                     "ip": ip,
                     "url": f"http://{ip}:{self.dns_port}",
-                    "server_id": f"dns_{ip}",
-                    "role": "unknown",
+                    "server_id": server_id,
+                    "role": srv.get("role", "unknown"),
                     "healthy": True,
                     "primary_since": None
                 }
-                for ip in discovered_ips
-            ]
-        self._bootstrapped = True
+                new_servers.append(server_entry)
+                
+                # Intentar obtener lista completa desde este servidor
+                if self._fetch_server_list(ip):
+                    with self._lock:
+                        self._dns_servers = new_servers
+                    self._bootstrapped = True
+                    logger.info(f"[DNSClientHA] Bootstrap via IP range exitoso")
+                    return True
+            
+            # Si no pudimos obtener lista completa, usar los descubiertos directamente
+            with self._lock:
+                self._dns_servers = new_servers
+            self._bootstrapped = True
+            logger.info(f"[DNSClientHA] Bootstrap via IP range completado (sin obtener lista completa)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[DNSClientHA] Error en descubrimiento por rango de IPs: {e}")
+            return False
     
     def _attempt_rebootstrap(self) -> bool:
         """
         Intenta re-bootstrapear el cliente DNS después de una falla.
         Útil para recuperarse de particiones de red.
         Preserva el caché persistente.
+        
+        Orden de intento:
+        1. Alias DNS de Docker
+        2. Descubrimiento por rango de IPs
+        3. Usar servidores conocidos previos
         """
         logger.warning("[DNSClientHA] Intentando re-bootstrap después de falla...")
         
@@ -165,10 +238,15 @@ class DNSClientHA:
             # NO limpiamos self._cache para preservar el caché persistente
             self._bootstrapped = False
         
-        # Re-ejecutar bootstrap
+        # Intento 1: Re-ejecutar bootstrap normal (Docker DNS)
         self._bootstrap()
         
-        return self._bootstrapped
+        if self._bootstrapped:
+            return True
+        
+        # Intento 2: Fallback a descubrimiento por rango de IPs
+        logger.info("[DNSClientHA] Docker DNS no disponible, intentando fallback a IP range discovery...")
+        return self._bootstrap_via_ip_range()
     
     def _discover_via_alias(self) -> List[str]:
         """
