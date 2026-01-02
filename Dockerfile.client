@@ -12,6 +12,8 @@ COPY app/__init__.py /app/__init__.py
 COPY app/common /app/common
 COPY app/client /app/client
 
+RUN mkdir -p /tmp/dns-cache
+
 ENV PYTHONPATH=/app \
     DNS_SERVICE_HOST=dns_service \
     TARGET_SERVICE_NAME=server \

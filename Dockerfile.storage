@@ -18,7 +18,7 @@ COPY app/__init__.py /app/__init__.py
 COPY app/storage /app/storage
 
 # Create internal directories (data and files live inside the container)
-RUN mkdir -p /app/files /app/logs /app/data /tmp/source_files
+RUN mkdir -p /app/files /app/logs /app/data /tmp/source_files /tmp/dns-cache
 
 # Only logs are exposed as persistent volume
 VOLUME ["/app/logs"]

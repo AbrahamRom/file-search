@@ -19,7 +19,7 @@ COPY app/common /app/common
 COPY app/processor /app/processor
 
 # Create log directory
-RUN mkdir -p /app/logs
+RUN mkdir -p /app/logs /tmp/dns-cache
 
 # Logs volume for persistent logging
 VOLUME ["/app/logs"]

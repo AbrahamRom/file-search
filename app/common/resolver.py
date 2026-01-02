@@ -7,6 +7,8 @@ import socket
 import time
 import os
 import threading
+import json
+from pathlib import Path
 from typing import Dict, Optional, Any, List
 
 try:
@@ -49,6 +51,12 @@ class DNSClientHA:
         # Cache de resoluciones
         self._cache: Dict[str, Dict[str, Any]] = {}
         
+        # Cache persistente
+        self._cache_dir = Path("/tmp/dns-cache")
+        self._cache_file = self._cache_dir / "dns_cache.json"
+        self._ensure_cache_dir()
+        self._load_persistent_cache()
+        
         # Lock para thread-safety
         self._lock = threading.Lock()
         
@@ -59,6 +67,44 @@ class DNSClientHA:
         
         # Bootstrap inicial
         self._bootstrap()
+    
+    def _ensure_cache_dir(self) -> None:
+        """Crea el directorio de caché si no existe"""
+        try:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+            logger.debug(f"[DNSClientHA] Directorio de caché asegurado: {self._cache_dir}")
+        except Exception as e:
+            logger.warning(f"[DNSClientHA] No se pudo crear directorio de caché: {e}")
+    
+    def _load_persistent_cache(self) -> None:
+        """Carga el caché persistente del disco al iniciar"""
+        try:
+            if self._cache_file.exists():
+                with open(self._cache_file, 'r') as f:
+                    data = json.load(f)
+                    self._cache = data.get("hostname_cache", {})
+                    logger.info(f"[DNSClientHA] Caché persistente cargado: {len(self._cache)} entradas")
+        except Exception as e:
+            logger.warning(f"[DNSClientHA] No se pudo cargar caché persistente: {e}")
+    
+    def _save_persistent_cache(self) -> None:
+        """Guarda el caché actual al disco"""
+        try:
+            with self._lock:
+                cache_copy = dict(self._cache)
+            
+            cache_data = {
+                "hostname_cache": cache_copy,
+                "timestamp": time.time()
+            }
+            
+            with open(self._cache_file, 'w') as f:
+                json.dump(cache_data, f)
+            
+            logger.debug(f"[DNSClientHA] Caché persistente guardado: {len(cache_copy)} entradas")
+        except Exception as e:
+            logger.warning(f"[DNSClientHA] No se pudo guardar caché persistente: {e}")
+
     
     def _bootstrap(self) -> None:
         """
@@ -105,14 +151,18 @@ class DNSClientHA:
         """
         Intenta re-bootstrapear el cliente DNS después de una falla.
         Útil para recuperarse de particiones de red.
+        Preserva el caché persistente.
         """
         logger.warning("[DNSClientHA] Intentando re-bootstrap después de falla...")
+        
+        # Guardar caché antes de limpiar
+        self._save_persistent_cache()
         
         # Limpiar estado anterior
         with self._lock:
             self._dns_servers = []
             self._primary_url = None
-            self._cache = {}
+            # NO limpiamos self._cache para preservar el caché persistente
             self._bootstrapped = False
         
         # Re-ejecutar bootstrap
@@ -363,7 +413,14 @@ class DNSClientHA:
                 if ip:
                     return ip
         
-        # 6. Fallback: Docker DNS nativo
+        # 6. Fallback: Cache persistente (aunque esté expirado)
+        with self._lock:
+            cached = self._cache.get(hostname)
+            if cached:
+                logger.warning(f"[DNSClientHA] Usando caché persistente expirado como último recurso: {hostname} -> {cached['ip']}")
+                return cached["ip"]
+        
+        # 7. Fallback: Docker DNS nativo
         logger.warning(f"[DNSClientHA] Todos los servidores DNS fallaron. Usando fallback nativo para '{hostname}'")
         try:
             ip = socket.gethostbyname(hostname)
@@ -375,6 +432,9 @@ class DNSClientHA:
                     "resolved_by": "fallback",
                     "role": "native"
                 }
+            
+            # Guardar en caché persistente
+            self._save_persistent_cache()
             
             logger.info(f"[DNSClientHA] Fallback exitoso: {hostname} -> {ip}")
             return ip
@@ -408,6 +468,9 @@ class DNSClientHA:
                         "resolved_by": server_id,
                         "role": role
                     }
+                
+                # Guardar caché persistente después de resolución exitosa
+                self._save_persistent_cache()
                 
                 logger.info(f"[DNSClientHA] Resolución OK: {hostname} -> {ip} (via {server_id}/{role})")
                 return ip

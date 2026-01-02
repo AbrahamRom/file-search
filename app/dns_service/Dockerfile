@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir --default-timeout=1000 -r /tmp/requirements.txt &
 COPY app/__init__.py /app/__init__.py
 COPY app/dns_service /app/dns_service
 
-RUN mkdir -p /app/logs
+RUN mkdir -p /app/logs /tmp/dns-cache
 ENV LOG_DIR=/app/logs
 # Añadimos / (root) al PYTHONPATH para que 'import app.dns_service' funcione
 ENV PYTHONPATH=/
