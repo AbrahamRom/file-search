@@ -74,6 +74,9 @@ HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", 5))
 # External port (accessible from outside Docker, e.g., from browser)
 PROCESSOR_EXTERNAL_PORT = os.getenv("PROCESSOR_EXTERNAL_PORT")  # Optional
 
+# External IP (accessible from outside Docker, e.g., from browser - host's public IP)
+PROCESSOR_EXTERNAL_IP = os.getenv("PROCESSOR_EXTERNAL_IP")  # Optional
+
 # Flag para controlar el loop de heartbeat
 _heartbeat_task: Optional[asyncio.Task] = None
 
@@ -248,6 +251,7 @@ async def _register_with_dns():
         my_ip = await _get_my_ip()
         port = int(os.getenv("PROCESSOR_PORT", 8000))
         external_port = int(PROCESSOR_EXTERNAL_PORT) if PROCESSOR_EXTERNAL_PORT else None
+        external_ip = PROCESSOR_EXTERNAL_IP  # IP del host físico (accesible desde navegador)
         
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
@@ -258,6 +262,8 @@ async def _register_with_dns():
                 }
                 if external_port:
                     payload["external_port"] = external_port
+                if external_ip:
+                    payload["external_ip"] = external_ip
                     
                 response = await client.post(
                     f"{dns_url}/processor/register",

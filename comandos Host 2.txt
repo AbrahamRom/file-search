@@ -1,0 +1,111 @@
+docker build -t file-search-dns:latest -f app/dns_service/Dockerfile .
+docker build -t file-search-storage:latest -f Dockerfile.storage .
+docker build -t file-search-processor:latest -f Dockerfile.processor .
+docker build -t file-search-client:latest -f Dockerfile.client .
+
+docker rm --force $(docker ps -aq)
+
+docker run -d \
+  --name dns_2 \
+  --hostname dns_2 \
+  --network file_search_net \
+  --network-alias dns \
+  -p 5354:5353 \
+  -v /srv/file-search/logs:/app/logs \
+  -e LOG_DIR=/app/logs \
+  -e LOG_LEVEL=INFO \
+  -e DNS_SERVER_ID=dns_2 \
+  -e DNS_PORT=5353 \
+  -e DNS_ALIAS=dns \
+  -e HEALTH_CHECK_INTERVAL=5 \
+  -e SYNC_INTERVAL=5 \
+  -e DISCOVERY_INTERVAL=15 \
+  -e API_SERVER_TIMEOUT=30 \
+  -e PROCESSOR_TIMEOUT=30 \
+  file-search-dns:latest
+  
+  docker run -d \
+  --name dns_3 \
+  --hostname dns_3 \
+  --network file_search_net \
+  --network-alias dns \
+  -p 5355:5353 \
+  -v /srv/file-search/logs:/app/logs \
+  -e LOG_DIR=/app/logs \
+  -e LOG_LEVEL=INFO \
+  -e DNS_SERVER_ID=dns_3 \
+  -e DNS_PORT=5353 \
+  -e DNS_ALIAS=dns \
+  -e HEALTH_CHECK_INTERVAL=5 \
+  -e SYNC_INTERVAL=5 \
+  -e DISCOVERY_INTERVAL=15 \
+  -e API_SERVER_TIMEOUT=30 \
+  -e PROCESSOR_TIMEOUT=30 \
+  file-search-dns:latest
+  
+  docker run -d \
+  --name storage_2 \
+  --hostname storage_2 \
+  --network file_search_net \
+  --network-alias storage \
+  -p 9001:8000 \
+  -v /srv/file-search/files:/tmp/source_files:ro \
+  -v /srv/file-search/logs:/app/logs \
+  -e STORAGE_ID=storage_2 \
+  -e STORAGE_PORT=8000 \
+  -e SERVER_ID=storage_2 \
+  -e SERVER_PORT=8000 \
+  -e FILES_ROOT=/app/files \
+  -e FILES_SOURCE_PATH=/tmp/source_files \
+  -e LOG_DIR=/app/logs \
+  -e DB_PATH=/app/data/storage.db \
+  -e DNS_ALIAS=dns \
+  -e DNS_SERVICE_PORT=5353 \
+  -e HEARTBEAT_INTERVAL=5 \
+  -e SYNC_INTERVAL=10 \
+  -e SYNC_TIMEOUT=30 \
+  file-search-storage:latest
+  
+    docker run -d \
+  --name storage_3 \
+  --hostname storage_3 \
+  --network file_search_net \
+  --network-alias storage \
+  -p 9002:8000 \
+  -v /srv/file-search/files:/tmp/source_files:ro \
+  -v /srv/file-search/logs:/app/logs \
+  -e STORAGE_ID=storage_3 \
+  -e STORAGE_PORT=8000 \
+  -e SERVER_ID=storage_3 \
+  -e SERVER_PORT=8000 \
+  -e FILES_ROOT=/app/files \
+  -e FILES_SOURCE_PATH=/tmp/source_files \
+  -e LOG_DIR=/app/logs \
+  -e DB_PATH=/app/data/storage.db \
+  -e DNS_ALIAS=dns \
+  -e DNS_SERVICE_PORT=5353 \
+  -e HEARTBEAT_INTERVAL=5 \
+  -e SYNC_INTERVAL=10 \
+  -e SYNC_TIMEOUT=30 \
+  file-search-storage:latest
+  
+  docker run -d \
+  --name processor_2 \
+  --hostname processor_2 \
+  --network file_search_net \
+  --network-alias processor \
+  -p 8001:8000 \
+  -v /srv/file-search/logs:/app/logs \
+  -e PROCESSOR_ID=processor_2 \
+  -e PROCESSOR_PORT=8000 \
+  -e PROCESSOR_EXTERNAL_PORT=8001 \
+  -e PROCESSOR_EXTERNAL_IP=192.168.163.212 \
+  -e STORAGE_NODES=http://storage_1:8000,http://storage_2:8000,http://storage_3:8000 \
+  -e STORAGE_URL=http://storage_1:8000 \
+  -e DNS_ALIAS=dns \
+  -e DNS_SERVICE_PORT=5353 \
+  -e STORAGE_TIMEOUT=10 \
+  -e STORAGE_MAX_RETRIES=3 \
+  -e STORAGE_RETRY_DELAY=0.5 \
+  -e LOG_DIR=/app/logs \
+  file-search-processor:latest

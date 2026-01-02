@@ -262,6 +262,8 @@ services:
     environment:
       - PROCESSOR_ID=processor_1
       - PROCESSOR_PORT=8000
+      - PROCESSOR_EXTERNAL_PORT=8000
+      - PROCESSOR_EXTERNAL_IP=${PROCESSOR_1_EXTERNAL_IP:-}
       - STORAGE_NODES=http://storage_1:8000,http://storage_2:8000,http://storage_3:8000
       - STORAGE_URL=http://storage_1:8000
       - DNS_ALIAS=dns
@@ -288,13 +290,15 @@ services:
     ports:
       - target: 8000
         published: 8000
-        mode: ingress
+        mode: host
 
   processor_2:
     image: file-search-processor:latest
     environment:
       - PROCESSOR_ID=processor_2
       - PROCESSOR_PORT=8000
+      - PROCESSOR_EXTERNAL_PORT=8001
+      - PROCESSOR_EXTERNAL_IP=${PROCESSOR_2_EXTERNAL_IP:-}
       - STORAGE_NODES=http://storage_1:8000,http://storage_2:8000,http://storage_3:8000
       - STORAGE_URL=http://storage_1:8000
       - DNS_ALIAS=dns
@@ -321,7 +325,7 @@ services:
     ports:
       - target: 8000
         published: 8001
-        mode: ingress
+        mode: host
 
   # ============================================================================
   # CLIENT

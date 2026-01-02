@@ -234,11 +234,14 @@ services:
       context: .
       dockerfile: Dockerfile.processor
     ports:
-      - "8000:8000"
+      - target: 8000
+        published: 8000
+        mode: host
     environment:
       - PROCESSOR_ID=processor_1
       - PROCESSOR_PORT=8000
       - PROCESSOR_EXTERNAL_PORT=8000
+      - PROCESSOR_EXTERNAL_IP=${PROCESSOR_1_EXTERNAL_IP:-localhost}
       # Configuración DNS - el Processor descubre Storage via DNS
       - DNS_ALIAS=dns
       - DNS_SERVICE_PORT=5353
@@ -266,11 +269,14 @@ services:
       context: .
       dockerfile: Dockerfile.processor
     ports:
-      - "8001:8000"
+      - target: 8000
+        published: 8001
+        mode: host
     environment:
       - PROCESSOR_ID=processor_2
       - PROCESSOR_PORT=8000
       - PROCESSOR_EXTERNAL_PORT=8001
+      - PROCESSOR_EXTERNAL_IP=${PROCESSOR_2_EXTERNAL_IP:-localhost}
       # Configuración DNS - el Processor descubre Storage via DNS
       - DNS_ALIAS=dns
       - DNS_SERVICE_PORT=5353

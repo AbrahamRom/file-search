@@ -5,7 +5,7 @@ import time
 import asyncio
 from typing import Dict, Optional, List, Set
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel
 import httpx
 from .logging_config import configure_logging
@@ -227,6 +227,7 @@ class ProcessorRegisterRequest(BaseModel):
     ip: str
     port: int = 8000
     external_port: Optional[int] = None  # Puerto accesible desde fuera de Docker
+    external_ip: Optional[str] = None  # IP accesible desde fuera de Docker (auto-detectada si no se proporciona)
 
 
 class ProcessorHeartbeatRequest(BaseModel):
@@ -238,6 +239,8 @@ class ProcessorResolveResponse(BaseModel):
     ip: str
     port: int
     url: str
+    external_ip: Optional[str] = None
+    external_port: Optional[int] = None
 
 
 # ============================================================================
@@ -898,19 +901,30 @@ async def list_api_servers():
 # ============================================================================
 
 @app.post("/processor/register")
-async def register_processor(request: ProcessorRegisterRequest, background_tasks: BackgroundTasks):
+async def register_processor(request: ProcessorRegisterRequest, background_tasks: BackgroundTasks, http_request: Request):
     """
     Registra un Processor Node en el DNS.
     Los processors son stateless y todos tienen el mismo peso.
     El registro se propaga automáticamente a todos los otros DNS.
+    
+    La IP externa se detecta automáticamente desde la que se registra el processor.
+    Si se proporciona external_ip explícitamente, se usa esa en lugar de auto-detectar.
     """
     async with processor_servers_lock:
         now = datetime.now().isoformat()
+        
+        # Detectar IP del cliente que se registra (IP desde la que se conecta el processor)
+        # Esto permite que el DNS sepa la IP pública/accesible del host del processor
+        client_ip = http_request.client.host if http_request.client else "localhost"
+        
+        # Usar IP explícita si se proporciona, sino usar auto-detectada del cliente
+        detected_external_ip = request.external_ip or client_ip
         
         processor_info = {
             "ip": request.ip,
             "port": request.port,
             "external_port": request.external_port or request.port,
+            "external_ip": detected_external_ip,
             "last_heartbeat": now,
             "registered_at": now,
             "healthy": True
@@ -920,7 +934,7 @@ async def register_processor(request: ProcessorRegisterRequest, background_tasks
         
         logger.info(
             f"[{server_id}] Processor {request.processor_id} registrado "
-            f"({request.ip}:{request.port}, externo:{processor_info['external_port']})"
+            f"(interno:{request.ip}:{request.port}, externo:{detected_external_ip}:{processor_info['external_port']})"
         )
         
         # Propagar a otros DNS en background
@@ -934,6 +948,8 @@ async def register_processor(request: ProcessorRegisterRequest, background_tasks
         return {
             "status": "registered",
             "processor_id": request.processor_id,
+            "external_ip": detected_external_ip,
+            "external_port": processor_info["external_port"],
             "total_processors": len(processor_servers)
         }
 
@@ -976,6 +992,7 @@ async def resolve_processor():
     """
     Resuelve un Processor Node disponible.
     Usa round-robin simple entre los processors activos.
+    Retorna también la IP externa y puerto externo para acceso desde fuera de Docker.
     """
     async with processor_servers_lock:
         now = datetime.now()
@@ -998,13 +1015,21 @@ async def resolve_processor():
         active_processors.sort(key=lambda x: x[0])
         pid, info = active_processors[0]
         
-        logger.info(f"[{server_id}] Resolución de processor -> {pid} ({info['ip']}:{info['port']})")
+        external_ip = info.get("external_ip", "localhost")
+        external_port = info.get("external_port", info["port"])
+        
+        logger.info(
+            f"[{server_id}] Resolución de processor -> {pid} "
+            f"(interno:{info['ip']}:{info['port']}, externo:{external_ip}:{external_port})"
+        )
         
         return ProcessorResolveResponse(
             processor_id=pid,
             ip=info["ip"],
             port=info["port"],
-            url=f"http://{info['ip']}:{info['port']}"
+            url=f"http://{info['ip']}:{info['port']}",
+            external_ip=external_ip,
+            external_port=external_port
         )
 
 
@@ -1018,15 +1043,21 @@ async def list_processors():
         for pid, info in processor_servers.items():
             last_hb = datetime.fromisoformat(info["last_heartbeat"])
             elapsed = (now - last_hb).total_seconds()
+            
+            # Usar external_ip detectada en el registro (no hardcodeada a localhost)
+            external_ip = info.get("external_ip", "localhost")
+            external_port = info.get("external_port", info["port"])
+            
             processors.append({
                 "processor_id": pid,
                 "ip": info["ip"],
                 "port": info["port"],
-                "external_port": info.get("external_port", info["port"]),
+                "external_port": external_port,
+                "external_ip": external_ip,
                 "last_heartbeat": info["last_heartbeat"],
                 "registered_at": info["registered_at"],
                 "url": f"http://{info['ip']}:{info['port']}",
-                "external_url": f"http://localhost:{info.get('external_port', info['port'])}",
+                "external_url": f"http://{external_ip}:{external_port}",
                 "alive": elapsed < PROCESSOR_TIMEOUT,
                 "seconds_since_heartbeat": int(elapsed)
             })
