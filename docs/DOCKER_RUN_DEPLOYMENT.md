@@ -38,24 +38,100 @@ Este documento describe cómo desplegar la arquitectura completa usando `docker 
 
 ## Paso 1: Configuración Inicial
 
-### 1.1 Obtener IPs de ambas máquinas
+### 1.0 Cómo obtener la IP de tu host
+
+**IMPORTANTE:** Necesitas la **IP real del host físico** (no `localhost` ni `127.0.0.1`), que es la IP accesible desde otros dispositivos en tu red.
+
+**En Linux/Mac:**
+```bash
+# Método 1: Obtener la IP principal
+hostname -I | awk '{print $1}'
+
+# Método 2: Ver todas las interfaces
+ip addr show | grep "inet " | grep -v 127.0.0.1
+
+# Método 3: IP de interfaz específica (ej: eth0, ens33, enp0s3)
+ip addr show eth0 | grep "inet " | awk '{print $2}' | cut -d/ -f1
+```
+
+**En Windows (PowerShell):**
+```powershell
+# Método 1: IP de red principal
+(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias Ethernet).IPAddress
+
+# Método 2: Ver todas las IPs
+ipconfig | findstr IPv4
+```
+
+**Ejemplo de salida:**
+```
+192.168.1.100  ← Esta es tu IP (puede variar: 192.168.x.x, 10.x.x.x, 172.x.x.x)
+```
+
+> **Nota:** La IP que necesitas es aquella en el formato `192.168.x.x`, `10.x.x.x` o `172.16-31.x.x` (redes privadas). **NO uses** `127.0.0.1` ni `localhost`.
+
+### 1.1 Guardar las IPs de tus hosts
+
+Una vez que tengas las IPs, guárdalas para usarlas en los comandos:
+
+```bash
+# Ejemplo:
+IP_MANAGER=192.168.1.100    # IP del nodo Manager
+IP_WORKER=192.168.1.101     # IP del nodo Worker
+```
+
+Estas IPs se usarán en:
+- `PROCESSOR_EXTERNAL_IP=<IP_MANAGER>` para processor_1
+- `PROCESSOR_EXTERNAL_IP=<IP_WORKER>` para processor_2
+- `BROWSER_API_URL=http://<IP_MANAGER>:8000` para el cliente
+
+## Nota: comportamiento con `mode: host` (Swarm)
+
+Si vas a desplegar usando Docker Swarm con `stack.separated.yml`, el proyecto ahora publica los puertos de los servicios de `processor` en `mode: host` (en lugar de `ingress`). Esto significa:
+
+- Cada `processor` queda vinculado directamente al puerto del **host físico** donde corre el contenedor.
+- Para acceder a un `processor` desde otra máquina debes usar la IP del nodo físico que aloja ese `processor` (ej. `http://192.168.174.212:8001`).
+- `mode: host` evita el balanceo de `ingress` de Swarm y expone el puerto directamente en el nodo, así que ten cuidado con conflictos de puertos y reglas de firewall.
+
+Recomendaciones:
+
+- Asegura que los puertos necesarios estén abiertos en el firewall del nodo (p. ej. `8000`, `8001`, `8501`, `9000`, etc.).
+- Si usas `docker run` (sin stack), el mapeo `-p HOST:CONTAINER` queda expuesto en el host por defecto y no necesitas cambiar el `mode`.
+- Actualiza la variable `BROWSER_API_URL` del `client` para apuntar a la IP del nodo que quieres usar como referencia para descargas desde el navegador.
+
+Ejemplo (Stack):
+
+```
+# En stack.separated.yml los processors usan:
+ports:
+  - target: 8000
+    published: 8000
+    mode: host
+
+# Acceso desde navegador:
+http://<IP_NODO_QUE_ESTA_CORRIENDO_EL_PROCESSOR>:8000
+```
+
+
+### 1.2 Verificar las IPs obtenidas
 
 **En el MANAGER:**
 ```bash
-hostname -I | awk '{print $1}'
-# Ejemplo: 192.168.1.100
+IP_MANAGER=$(hostname -I | awk '{print $1}')
+echo "IP del Manager: $IP_MANAGER"
+# Debe mostrar algo como: 192.168.1.100
 ```
 
 **En el WORKER:**
 ```bash
-hostname -I | awk '{print $1}'
-# Ejemplo: 192.168.1.101
+IP_WORKER=$(hostname -I | awk '{print $1}')
+echo "IP del Worker: $IP_WORKER"
+# Debe mostrar algo como: 192.168.1.101
 ```
 
-> **Nota:** Guarda estas IPs, las usarás en los siguientes pasos.
-> - `IP_MANAGER` = IP del Manager (ej: 192.168.1.100)
-> - `IP_WORKER` = IP del Worker (ej: 192.168.1.101)
-
+> **Verificación:** Ambas IPs deben estar en la misma red (ej: ambas `192.168.1.x`).
+> Prueba conectividad: `ping <IP_DE_LA_OTRA_MAQUINA>`
+### 1.3 Crear directorios en AMBAS máquinas
 ### 1.2 Crear directorios en AMBAS máquinas
 
 ```bash
@@ -71,17 +147,20 @@ sudo chmod -R 777 /srv/file-search
 ```
 
 ---
-
 ## Paso 2: Inicializar Docker Swarm (Solo para la red overlay)
 
 Aunque no usaremos el stack, necesitamos Swarm para crear una red overlay entre las máquinas.
 
 ### 2.1 En el MANAGER - Inicializar Swarm
 
+**Usa la IP obtenida en el Paso 1:**
 ```bash
-docker swarm init --advertise-addr <IP_MANAGER>
+# Usando la variable IP_MANAGER del Paso 1
+docker swarm init --advertise-addr $IP_MANAGER
 
-# Ejemplo:
+# O directamente con tu IP:
+# docker swarm init --advertise-addr 192.168.1.100
+```jemplo:
 # docker swarm init --advertise-addr 192.168.1.100
 ```
 
@@ -217,6 +296,8 @@ docker run -d \
   -v /srv/file-search/logs:/app/logs \
   -e PROCESSOR_ID=processor_1 \
   -e PROCESSOR_PORT=8000 \
+  -e PROCESSOR_EXTERNAL_PORT=8000 \
+  -e PROCESSOR_EXTERNAL_IP=<IP_MANAGER> \
   -e STORAGE_NODES=http://storage_1:8000,http://storage_2:8000,http://storage_3:8000 \
   -e STORAGE_URL=http://storage_1:8000 \
   -e DNS_ALIAS=dns \
@@ -227,6 +308,8 @@ docker run -d \
   -e LOG_DIR=/app/logs \
   file-search-processor:latest
 ```
+
+> **Importante:** Reemplaza `<IP_MANAGER>` con la IP real del nodo Manager (ej: `192.168.1.100`)
 
 ---
 
@@ -344,6 +427,8 @@ docker run -d \
   -v /srv/file-search/logs:/app/logs \
   -e PROCESSOR_ID=processor_2 \
   -e PROCESSOR_PORT=8000 \
+  -e PROCESSOR_EXTERNAL_PORT=8001 \
+  -e PROCESSOR_EXTERNAL_IP=<IP_WORKER> \
   -e STORAGE_NODES=http://storage_1:8000,http://storage_2:8000,http://storage_3:8000 \
   -e STORAGE_URL=http://storage_1:8000 \
   -e DNS_ALIAS=dns \
@@ -354,6 +439,8 @@ docker run -d \
   -e LOG_DIR=/app/logs \
   file-search-processor:latest
 ```
+
+> **Importante:** Reemplaza `<IP_WORKER>` con la IP real del nodo Worker (ej: `192.168.1.101`)
 
 ### 5.6 Client (Puerto 8501)
 
@@ -539,13 +626,15 @@ docker network inspect file_search_net --format '{{range .Containers}}{{.Name}} 
 ```
 
 ---
-
-## Script de Inicio Rápido
-
 ### Para el MANAGER (guardar como `start-manager.sh`):
 
 ```bash
 #!/bin/bash
+set -e
+
+# Obtener IP del manager automáticamente
+IP_MANAGER=$(hostname -I | awk '{print $1}')
+echo "=== Iniciando servicios en MANAGER (IP: $IP_MANAGER) ==="
 set -e
 
 echo "=== Iniciando servicios en MANAGER ==="
@@ -593,8 +682,6 @@ docker run -d --name processor_1 --hostname processor_1 \
 echo "Processor_1 iniciado"
 echo "=== MANAGER listo ==="
 docker ps
-```
-
 ### Para el WORKER (guardar como `start-worker.sh`):
 
 ```bash
@@ -602,7 +689,10 @@ docker ps
 set -e
 
 MANAGER_IP="${1:-192.168.1.100}"  # Pasar IP del manager como argumento
+IP_WORKER=$(hostname -I | awk '{print $1}')
 
+echo "=== Iniciando servicios en WORKER (IP: $IP_WORKER) ==="
+echo "Manager IP: $MANAGER_IP"
 echo "=== Iniciando servicios en WORKER ==="
 echo "Manager IP: $MANAGER_IP"
 
@@ -697,9 +787,18 @@ docker ps
 chmod +x start-manager.sh
 ./start-manager.sh
 
-# En el Worker
+# En el Worker (reemplazar con la IP real de tu Manager)
 chmod +x start-worker.sh
-./start-worker.sh 192.168.1.100  # IP del Manager
+./start-worker.sh 192.168.1.100  # Usar la IP del Manager obtenida en el Paso 1
+```
+
+**Verificar las IPs usadas:**
+```bash
+# En el Manager
+docker inspect processor_1 | grep PROCESSOR_EXTERNAL_IP
+
+# En el Worker
+docker inspect processor_2 | grep PROCESSOR_EXTERNAL_IP
 ```
 
 ---
@@ -723,3 +822,10 @@ chmod +x start-worker.sh
 - **Cliente Web**: `http://<IP_WORKER>:8501`
 - **API (Processor 1)**: `http://<IP_MANAGER>:8000`
 - **API (Processor 2)**: `http://<IP_WORKER>:8001`
+
+Nota: si desplegaste usando Docker Swarm con `mode: host` para los `processor`, utiliza la IP del nodo físico que está ejecutando cada `processor` (no `localhost` desde otra máquina). Por ejemplo:
+
+- `http://192.168.174.100:8000` (Processor_1 en nodo con IP 192.168.174.100)
+- `http://192.168.174.212:8001` (Processor_2 en nodo con IP 192.168.174.212)
+
+Si estás usando `docker run` directamente en cada host, los mapeos `-p HOST:CONTAINER` ya exponen los puertos en la IP del host.

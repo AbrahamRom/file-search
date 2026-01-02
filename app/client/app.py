@@ -81,6 +81,11 @@ _cached_server_url: Optional[str] = None
 _cache_timestamp: float = 0
 _cache_ttl: float = 30  # TTL del cache en segundos
 
+# Cache de processors disponibles (para URLs de descarga)
+_cached_processors: List[Dict] = []
+_processors_cache_timestamp: float = 0
+_processors_cache_ttl: float = 15  # TTL del cache de processors en segundos
+
 
 def _discover_dns_urls() -> List[str]:
     """Descubre todas las URLs de DNS usando el alias de Docker (puede devolver varias IPs)."""
@@ -142,6 +147,95 @@ def _invalidate_server_cache():
     logger.info("Cache de servidor invalidado")
 
 
+def _get_available_processors() -> List[Dict]:
+    """
+    Obtiene la lista de processors disponibles desde el DNS.
+    
+    Returns:
+        Lista de diccionarios con información de processors disponibles.
+        Cada diccionario contiene: processor_id, ip, port, url, alive
+    """
+    global _cached_processors, _processors_cache_timestamp
+    
+    # Verificar cache
+    if _cached_processors and (time.time() - _processors_cache_timestamp) < _processors_cache_ttl:
+        return _cached_processors
+    
+    # Obtener lista de processors desde el DNS
+    dns_urls = _discover_dns_urls()
+    if not dns_urls:
+        logger.warning("No se pudo descubrir ningún DNS para obtener processors")
+        return []
+    
+    for dns_url in dns_urls:
+        try:
+            response = requests.get(f"{dns_url}/processor/list", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                processors = data.get("processors", [])
+                # Filtrar solo los processors activos
+                active_processors = [p for p in processors if p.get("alive", False)]
+                
+                if active_processors:
+                    _cached_processors = active_processors
+                    _processors_cache_timestamp = time.time()
+                    logger.info(f"Processors disponibles obtenidos desde DNS: {len(active_processors)}")
+                    return active_processors
+        except Exception as e:
+            logger.warning(f"Error obteniendo processors desde DNS {dns_url}: {e}")
+    
+    logger.warning("No se pudo obtener la lista de processors desde ningún DNS")
+    return []
+
+
+def _map_processor_to_browser_url(processor_ip: str, processor_port: int) -> str:
+    """
+    Mapea la IP interna de un processor a una URL accesible desde el navegador.
+    
+    DEPRECATED: Esta función ya no es necesaria ya que el DNS devuelve external_url.
+    Se mantiene para compatibilidad hacia atrás.
+    
+    Args:
+        processor_ip: IP interna del processor en la red Docker
+        processor_port: Puerto interno del processor
+    
+    Returns:
+        URL accesible desde el navegador (localhost:PUERTO_EXPUESTO)
+    """
+    return f"http://localhost:{processor_port}"
+
+
+def _get_processor_download_url() -> Optional[str]:
+    """
+    Obtiene una URL de processor disponible para descargas.
+    
+    Usa round-robin simple entre los processors disponibles.
+    
+    Returns:
+        URL base del processor para usar en descargas, o None si no hay disponibles
+    """
+    processors = _get_available_processors()
+    if not processors:
+        # Fallback a BROWSER_API_URL si no podemos obtener processors del DNS
+        logger.warning("No hay processors disponibles, usando BROWSER_API_URL como fallback")
+        return BROWSER_API_URL
+    
+    # Round-robin simple: rotar entre processors
+    # Usar selección aleatoria para distribuir la carga
+    import random
+    processor = random.choice(processors)
+    
+    # Usar external_url si está disponible, sino construir URL
+    processor_url = processor.get("external_url")
+    if not processor_url:
+        # Fallback: construir URL usando el puerto externo o interno
+        external_port = processor.get("external_port", processor.get("port", 8000))
+        processor_url = f"http://localhost:{external_port}"
+    
+    logger.debug(f"Processor seleccionado para descarga: {processor['processor_id']} -> {processor_url}")
+    return processor_url
+
+
 def get_api_base_url() -> str:
     """
     Obtiene la URL base del servidor API.
@@ -165,11 +259,11 @@ def api_url(path: str) -> str:
 
 def build_download_url(record: dict) -> str:
     """
-    Construye la URL de descarga para un archivo.
+    Construye la URL de descarga para un archivo con descubrimiento automático.
     
-    Usa BROWSER_API_URL porque esta URL será usada por el navegador del usuario,
-    que está fuera de la red Docker y necesita acceder al servicio via los
-    puertos expuestos (8000 para processor_1, 8001 para processor_2, etc.).
+    Consulta al DNS para obtener processors disponibles y construye una URL
+    accesible desde el navegador del usuario. Esto permite que las descargas
+    funcionen en cualquier nodo del swarm sin hardcodear puertos.
     
     Args:
         record: Diccionario con la información del archivo (debe contener 'file_id')
@@ -182,8 +276,13 @@ def build_download_url(record: dict) -> str:
         logger.warning(f"Registro sin file_id: {record}")
         return "#"
     
-    # Usar la URL del navegador (accesible desde fuera de Docker)
-    base_url = BROWSER_API_URL.rstrip("/")
+    # Obtener processor disponible dinámicamente
+    processor_url = _get_processor_download_url()
+    if not processor_url:
+        logger.error("No se pudo obtener ningún processor para descarga")
+        return "#"
+    
+    base_url = processor_url.rstrip("/")
     return f"{base_url}/files/{file_id}/download"
 
 
@@ -269,6 +368,27 @@ def upload_file_to_server(uploaded_file, folder: str = "") -> dict:
     
     except Exception as e:
         logger.error(f"Error al subir archivo: {e}")
+        raise
+
+
+def download_file_from_server(file_id: str, file_name: str) -> bytes:
+    """
+    Descarga un archivo del servidor usando el endpoint /files/{file_id}/download.
+    
+    Args:
+        file_id: ID del archivo a descargar
+        file_name: Nombre del archivo (para logging)
+    
+    Returns:
+        Contenido del archivo en bytes
+    """
+    try:
+        logger.info(f"Descargando archivo: {file_name} (ID: {file_id})")
+        response = make_request_with_retry("GET", f"files/{file_id}/download")
+        return response.content
+    
+    except Exception as e:
+        logger.error(f"Error al descargar archivo {file_name}: {e}")
         raise
 
 
