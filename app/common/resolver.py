@@ -8,6 +8,7 @@ import time
 import os
 import threading
 import json
+import random
 from pathlib import Path
 from typing import Dict, Optional, Any, List
 
@@ -831,14 +832,12 @@ class DNSClientHA:
             if result is not None:
                 return result
         
-        # Intentar con otros servidores
+        # Intentar con otros servidores en orden aleatorio (balanceo simple)
         with self._lock:
-            servers_copy = list(self._dns_servers)
+            servers_copy = [s for s in self._dns_servers if s.get("healthy") and s.get("url") != self._primary_url]
+        random.shuffle(servers_copy)
         
         for server in servers_copy:
-            if not server.get("healthy") or server.get("url") == self._primary_url:
-                continue
-            
             result = self._try_list_storage(server.get("url"))
             if result is not None:
                 return result

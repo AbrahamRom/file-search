@@ -79,7 +79,7 @@ RETRY_DELAY = float(os.getenv("RETRY_DELAY", 0.5))
 # Cache de la URL del servidor
 _cached_server_url: Optional[str] = None
 _cache_timestamp: float = 0
-_cache_ttl: float = 30  # TTL del cache en segundos
+_cache_ttl: float = 10  # TTL del cache en segundos
 
 # Cache de processors disponibles (para URLs de descarga)
 _cached_processors: List[Dict] = []

@@ -1010,10 +1010,9 @@ async def resolve_processor():
             logger.error(f"[{server_id}] No hay processors disponibles")
             raise HTTPException(status_code=503, detail="No hay processors disponibles")
         
-        # Round-robin simple: usar el primero de la lista ordenada
-        # (en producción podrías implementar un índice rotativo)
-        active_processors.sort(key=lambda x: x[0])
-        pid, info = active_processors[0]
+        # Selección aleatoria para balanceo de carga
+        import random
+        pid, info = random.choice(active_processors)
         
         external_ip = info.get("external_ip", "localhost")
         external_port = info.get("external_port", info["port"])
