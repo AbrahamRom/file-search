@@ -118,13 +118,19 @@ class StorageClient:
             dns_port = int(os.getenv("DNS_SERVICE_PORT", 5353))
             self.dns_client = DNSClientHA(dns_alias=dns_alias, dns_port=dns_port)
     
-    def _get_storage_info(self, force_refresh: bool = False, exclude_storage_id: Optional[str] = None) -> tuple[str, str]:
+    def _get_storage_info(
+        self,
+        force_refresh: bool = False,
+        exclude_storage_id: Optional[str] = None,
+        mode: str = "read",
+    ) -> tuple[str, str]:
         """
         Get current Storage Node URL from DNS.
         
         Args:
             force_refresh: Force DNS cache invalidation
             exclude_storage_id: Exclude this storage ID and search for alternatives
+            mode: "read" para distribuir lecturas, "write" para forzar PRIMARY
         
         Returns:
             Tuple of (storage_url, storage_id)
@@ -135,8 +141,10 @@ class StorageClient:
         # Si hay un storage a excluir (ej: devolvió lease_expired), buscar alternativa
         if exclude_storage_id:
             storage_info = self.dns_client.resolve_storage_from_all_dns(exclude_storage_id=exclude_storage_id)
+        elif mode == "write":
+            storage_info = self.dns_client.resolve_storage_server_for_write()
         else:
-            storage_info = self.dns_client.resolve_storage_server()
+            storage_info = self.dns_client.resolve_storage_server_for_read()
         
         if not storage_info:
             raise StorageUnavailableError("No storage nodes available from DNS")
@@ -206,6 +214,8 @@ class StorageClient:
         self,
         method: str,
         path: str,
+        *,
+        read_only: bool = True,
         **kwargs,
     ) -> httpx.Response:
         """
@@ -234,7 +244,8 @@ class StorageClient:
                 # Si hubo error de fencing, excluir ese storage y buscar alternativo
                 storage_url, storage_id = self._get_storage_info(
                     force_refresh=dns_refreshed,
-                    exclude_storage_id=failed_storage_id
+                    exclude_storage_id=failed_storage_id,
+                    mode="read" if read_only else "write",
                 )
                 
                 logger.debug(
@@ -335,13 +346,13 @@ class StorageClient:
         if shard_id:
             params["shard_id"] = shard_id
         
-        response = await self._request_with_dns_failover("GET", "/files", params=params)
+        response = await self._request_with_dns_failover("GET", "/files", params=params, read_only=True)
         response.raise_for_status()
         return response.json()
     
     async def get_file(self, file_id: str) -> Optional[Dict]:
         """Get file metadata by ID."""
-        response = await self._request_with_dns_failover("GET", f"/files/{file_id}")
+        response = await self._request_with_dns_failover("GET", f"/files/{file_id}", read_only=True)
         
         if response.status_code == 404:
             return None
@@ -361,7 +372,7 @@ class StorageClient:
         if shard_id:
             params["shard_id"] = shard_id
         
-        response = await self._request_with_dns_failover("GET", "/search", params=params)
+        response = await self._request_with_dns_failover("GET", "/search", params=params, read_only=True)
         response.raise_for_status()
         return response.json()
     
@@ -380,6 +391,7 @@ class StorageClient:
             response = await self._request_with_dns_failover(
                 "GET",
                 f"/files/{file_id}/download",
+                read_only=True,
             )
             
             # Check for "file not on disk" error (404 with specific message)
@@ -470,13 +482,14 @@ class StorageClient:
             "/upload",
             files=files,
             data=data,
+            read_only=False,
         )
         response.raise_for_status()
         return response.json()
     
     async def delete_file(self, file_id: str) -> bool:
         """Delete a file."""
-        response = await self._request_with_dns_failover("DELETE", f"/files/{file_id}")
+        response = await self._request_with_dns_failover("DELETE", f"/files/{file_id}", read_only=False)
         return response.status_code == 200
     
     async def upsert_file(self, file_data: Dict) -> Dict:
@@ -485,13 +498,14 @@ class StorageClient:
             "POST",
             "/files",
             json=file_data,
+            read_only=False,
         )
         response.raise_for_status()
         return response.json()
     
     async def get_storage_status(self) -> Dict:
         """Get status of the current Storage Node."""
-        response = await self._request_with_dns_failover("GET", "/status")
+        response = await self._request_with_dns_failover("GET", "/status", read_only=True)
         response.raise_for_status()
         return response.json()
     

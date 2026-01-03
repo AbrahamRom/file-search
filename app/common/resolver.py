@@ -674,18 +674,19 @@ class DNSClientHA:
         logger.error("[DNSClientHA] No se pudo resolver Storage Node desde ningún DNS")
         return None
     
-    def _try_resolve_storage(self, dns_url: str) -> Optional[Dict[str, Any]]:
+    def _try_resolve_storage(self, dns_url: str, resolve_path: str = "/server/resolve") -> Optional[Dict[str, Any]]:
         """
         Intenta resolver el Storage Node activo desde un servidor DNS específico.
         
         Args:
             dns_url: URL del servidor DNS (ej: http://dns_1:5353)
+            resolve_path: Endpoint a consultar en el DNS (ej: /server/resolve_write o /server/resolve_read)
             
         Returns:
             Dict con info del Storage Node o None si falla
         """
         try:
-            resolve_url = f"{dns_url}/server/resolve"
+            resolve_url = f"{dns_url}{resolve_path}"
             logger.debug(f"[DNSClientHA] Consultando Storage desde {dns_url}")
             
             response = requests.get(resolve_url, timeout=3.0)
@@ -844,6 +845,55 @@ class DNSClientHA:
         
         logger.error("[DNSClientHA] No se pudo listar Storage Nodes")
         return []
+    def resolve_storage_server_for_write(self) -> Optional[Dict[str, Any]]:
+        """Resuelve el Storage PRIMARY para escrituras (uploads)."""
+        self._maybe_refresh_servers()
+
+        # Intentar con el DNS primario primero
+        if self._primary_url:
+            result = self._try_resolve_storage(self._primary_url, "/server/resolve_write")
+            if result:
+                return result
+
+        # Fallback: probar con el resto de servidores DNS conocidos
+        with self._lock:
+            servers_copy = list(self._dns_servers)
+
+        for server in servers_copy:
+            dns_url = server.get("url")
+            if not dns_url or dns_url == self._primary_url:
+                continue
+            result = self._try_resolve_storage(dns_url, "/server/resolve_write")
+            if result:
+                return result
+
+        return None
+
+    def resolve_storage_server_for_read(self) -> Optional[Dict[str, Any]]:
+        """Resuelve un Storage (PRIMARY o BACKUP) para lecturas (búsquedas)."""
+        self._maybe_refresh_servers()
+        # Preferir random entre todos los DNS para obtener vista más actual
+        urls = []
+        with self._lock:
+            urls = [s.get("url") for s in self._dns_servers if s.get("healthy")]
+        random.shuffle(urls)
+        for dns_url in urls:
+            try:
+                # Consultar endpoint específico de lectura si existe
+                response = requests.get(f"{dns_url}/server/resolve_read", timeout=3.0)
+                if response.status_code == 200:
+                    data = response.json()
+                    return {
+                        "server_id": data.get("server_id"),
+                        "ip": data.get("ip"),
+                        "port": data.get("port"),
+                        "url": data.get("url"),
+                        "role": data.get("role", "PRIMARY"),
+                    }
+            except Exception:
+                self._mark_server_unhealthy(dns_url)
+        # Fallback: usar lógica existente
+        return self.resolve_storage_server()
     
     def _try_list_storage(self, dns_url: str) -> Optional[List[Dict[str, Any]]]:
         """Intenta listar Storage Nodes desde un DNS específico."""

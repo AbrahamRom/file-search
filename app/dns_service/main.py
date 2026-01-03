@@ -865,6 +865,36 @@ async def resolve_api_server():
             detail="No hay servidores API disponibles. Todos los storage nodes están caídos."
         )
 
+@app.get("/server/resolve_write", response_model=APIServerResolveResponse)
+async def resolve_api_server_write():
+    """Retorna PRIMARY para escrituras."""
+    return await resolve_api_server()
+
+@app.get("/server/resolve_read", response_model=APIServerResolveResponse)
+async def resolve_api_server_read():
+    """Retorna un nodo (PRIMARY o BACKUP) vivo para lecturas."""
+    async with api_servers_lock:
+        now = datetime.now()
+        candidates = []
+        for sid, info in api_servers.items():
+            last_hb = datetime.fromisoformat(info["last_heartbeat"])
+            elapsed = (now - last_hb).total_seconds()
+            if elapsed < API_SERVER_TIMEOUT:
+                candidates.append((sid, info))
+        if not candidates:
+            raise HTTPException(status_code=503, detail="No hay servidores API disponibles para lectura")
+        import random
+        sid, info = random.choice(candidates)
+        return APIServerResolveResponse(
+            server_id=sid,
+            ip=info["ip"],
+            port=info["port"],
+            role=info.get("role", "BACKUP"),
+            url=f"http://{info['ip']}:{info['port']}",
+            primary_epoch=info.get("primary_epoch"),
+            lease_expires_at=info.get("lease_expires_at")
+        )
+
 
 @app.get("/server/list")
 async def list_api_servers():
