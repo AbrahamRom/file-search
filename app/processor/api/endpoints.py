@@ -15,6 +15,7 @@ The Processor Node is STATELESS:
 """
 
 import asyncio
+import hashlib
 import importlib
 import logging
 import os
@@ -67,6 +68,7 @@ PROCESSOR_ID = os.getenv("PROCESSOR_ID", "processor_1")
 # DNS configuration for discovering Storage Nodes
 DNS_ALIAS = os.getenv("DNS_ALIAS", "dns")
 DNS_PORT = int(os.getenv("DNS_SERVICE_PORT", 5353))
+DEFAULT_SHARD_STRATEGY = os.getenv("SHARD_STRATEGY", "alpha").lower()
 
 # Heartbeat interval for DNS registration
 HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", 5))
@@ -84,6 +86,34 @@ _heartbeat_task: Optional[asyncio.Task] = None
 _cached_dns_url: Optional[str] = None
 _cached_dns_ts: float = 0.0
 _dns_url_cache_ttl: float = float(os.getenv("DNS_URL_CACHE_TTL", 10))
+
+
+def _compute_shard_id(
+    filename: str,
+    explicit_shard_id: Optional[str] = None,
+    strategy_override: Optional[str] = None,
+) -> Optional[str]:
+    """Determina shard_id usando estrategia configurada (alpha/hash/none)."""
+    if explicit_shard_id:
+        return explicit_shard_id
+
+    strategy = (strategy_override or DEFAULT_SHARD_STRATEGY or "alpha").lower()
+    if strategy in ("", "none"):
+        return None
+
+    if strategy == "alpha":
+        if not filename:
+            return None
+        first_char = filename[0].upper()
+        return "shard_a_m" if first_char < "N" else "shard_n_z"
+
+    if strategy == "hash":
+        hash_val = int(hashlib.md5(filename.encode()).hexdigest(), 16)
+        num_shards = int(os.getenv("NUM_SHARDS", 2))
+        num_shards = max(1, num_shards)
+        return f"shard_{hash_val % num_shards}"
+
+    return None
 
 
 # ============================================================================
@@ -113,6 +143,7 @@ class UploadResponse(BaseModel):
     filename: str
     size: int
     storage_id: str
+    shard_id: Optional[str] = None
 
 
 class ProcessorStatus(BaseModel):
@@ -473,7 +504,7 @@ async def get_status():
 # ============================================================================
 
 @app.get("/files", response_model=List[FileMetadata])
-async def list_files(request: Request):
+async def list_files(request: Request, shard_id: Optional[str] = Query(None)):
     """
     List all files.
     
@@ -483,7 +514,21 @@ async def list_files(request: Request):
     client = await get_storage_client_instance()
     
     try:
-        files = await client.list_files()
+        if shard_id:
+            files = await client.list_files(shard_id=shard_id)
+        else:
+            shard_map = _dns_client.list_shards() if _dns_client else {}
+            if shard_map:
+                tasks = [client.list_files(shard_id=sid) for sid in shard_map.keys()]
+                per_shard = await asyncio.gather(*tasks, return_exceptions=True)
+                files = []
+                for result in per_shard:
+                    if isinstance(result, Exception):
+                        logger.warning("Shard list_files failed: %s", result)
+                        continue
+                    files.extend(result or [])
+            else:
+                files = await client.list_files()
         
         client_host = request.client.host if request.client else "-"
         access_logger.info(
@@ -503,12 +548,26 @@ async def list_files(request: Request):
 
 
 @app.get("/files/{file_id}", response_model=FileMetadata)
-async def get_file(file_id: str, request: Request):
-    """Get file metadata by ID."""
+async def get_file(file_id: str, request: Request, shard_id: Optional[str] = Query(None)):
+    """Get file metadata by ID (optionally scoped to shard)."""
     client = await get_storage_client_instance()
     
     try:
-        file_data = await client.get_file(file_id)
+        file_data: Optional[dict] = None
+
+        if shard_id:
+            file_data = await client.get_file(file_id, shard_id=shard_id)
+        else:
+            # Try default path first
+            file_data = await client.get_file(file_id)
+
+            # If not found, probe each shard
+            if not file_data and _dns_client:
+                shard_map = _dns_client.list_shards()
+                for sid in shard_map.keys():
+                    file_data = await client.get_file(file_id, shard_id=sid)
+                    if file_data:
+                        break
         
         if not file_data:
             raise HTTPException(status_code=404, detail="File not found")
@@ -522,12 +581,20 @@ async def get_file(file_id: str, request: Request):
 
 
 @app.delete("/files/{file_id}")
-async def delete_file(file_id: str, request: Request):
+async def delete_file(file_id: str, request: Request, shard_id: Optional[str] = Query(None)):
     """Delete a file."""
     client = await get_storage_client_instance()
     
     try:
-        success = await client.delete_file(file_id)
+        success = await client.delete_file(file_id, shard_id=shard_id)
+        
+        if not success and not shard_id and _dns_client:
+            shard_map = _dns_client.list_shards()
+            for sid in shard_map.keys():
+                success = await client.delete_file(file_id, shard_id=sid)
+                if success:
+                    shard_id = sid
+                    break
         
         if not success:
             raise HTTPException(status_code=404, detail="File not found")
@@ -544,7 +611,7 @@ async def delete_file(file_id: str, request: Request):
 
 
 @app.get("/files/{file_id}/download")
-async def download_file(file_id: str, request: Request):
+async def download_file(file_id: str, request: Request, shard_id: Optional[str] = Query(None)):
     """
     Download a file.
     
@@ -554,12 +621,22 @@ async def download_file(file_id: str, request: Request):
     
     try:
         # First, get file metadata
-        file_data = await client.get_file(file_id)
+        file_data = await client.get_file(file_id, shard_id=shard_id)
+        if not file_data:
+            if _dns_client:
+                shard_map = _dns_client.list_shards()
+                for sid in shard_map.keys():
+                    file_data = await client.get_file(file_id, shard_id=sid)
+                    if file_data:
+                        shard_id = sid
+                        break
+        
         if not file_data:
             raise HTTPException(status_code=404, detail="File not found")
         
         # Download content
-        content = await client.download_file(file_id)
+        target_shard = shard_id or file_data.get("shard_id")
+        content = await client.download_file(file_id, shard_id=target_shard)
         
         client_host = request.client.host if request.client else "-"
         access_logger.info(
@@ -598,6 +675,7 @@ async def search_files(
     query: str = Query(..., min_length=1),
     limit: int = Query(10, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    shard_id: Optional[str] = Query(None),
 ):
     """
     Search files by name.
@@ -608,8 +686,28 @@ async def search_files(
     client = await get_storage_client_instance()
     
     try:
-        # For now, direct query. With sharding, use scatter_gather_search
-        result = await client.search_files(query=query, limit=limit, offset=offset)
+        if shard_id:
+            result = await client.search_files(query=query, limit=limit, offset=offset, shard_id=shard_id)
+        else:
+            shard_map = _dns_client.list_shards() if _dns_client else {}
+            if shard_map:
+                tasks = [client.search_files(query=query, limit=limit, offset=offset, shard_id=sid) for sid in shard_map.keys()]
+                per_shard = await asyncio.gather(*tasks, return_exceptions=True)
+                merged_results = []
+                for shard_result in per_shard:
+                    if isinstance(shard_result, Exception):
+                        logger.warning("Shard search failed: %s", shard_result)
+                        continue
+                    merged_results.extend(shard_result.get("results", []))
+                result = {
+                    "results": merged_results,
+                    "total": len(merged_results),
+                    "query": query,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            else:
+                result = await client.search_files(query=query, limit=limit, offset=offset)
         
         client_host = request.client.host if request.client else "-"
         access_logger.info(
@@ -642,6 +740,8 @@ async def upload_file(
     request: Request,
     file: UploadFile = File(...),
     folder: str = Form(None),
+    shard_id: str = Form(None),
+    shard_strategy: str = Form(None),
 ):
     """
     Upload a file.
@@ -653,12 +753,14 @@ async def upload_file(
     try:
         # Read file content
         content = await file.read()
+        target_shard = _compute_shard_id(file.filename, shard_id, shard_strategy)
         
         # Upload to storage
         result = await client.upload_file(
             filename=file.filename,
             content=content,
             folder=folder,
+            shard_id=target_shard,
         )
         
         client_host = request.client.host if request.client else "-"
@@ -675,6 +777,7 @@ async def upload_file(
             filename=result["filename"],
             size=result["size"],
             storage_id=result.get("storage_id", "unknown"),
+            shard_id=target_shard or result.get("shard_id"),
         )
         
     except StorageUnavailableError:

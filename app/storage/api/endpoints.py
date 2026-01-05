@@ -14,10 +14,12 @@ The API is NOT exposed directly to clients - it's for internal cluster communica
 import importlib
 import logging
 import os
+import socket
 import shutil
 import sqlite3
 import tempfile
 import hashlib
+import httpx
 from datetime import datetime, timezone
 from typing import List, Optional
 from pathlib import Path
@@ -43,17 +45,20 @@ UploadFile = fastapi.UploadFile
 File = fastapi.File
 Form = fastapi.Form
 CORSMiddleware = cors_middleware.CORSMiddleware
+RedirectResponse = fastapi.responses.RedirectResponse
 
 from ..db.crud import (
     delete_file,
     get_file,
+    get_file_count,
     list_files,
     search_files,
     upsert_file,
-    get_file_count,
+    upsert_storage_node,
 )
 from ..db.db import init_db, DB_PATH
-from ..services.scanner import sync, FILES_ROOT, compute_file_id
+from ..services.scanner import sync, FILES_ROOT, compute_file_id, compute_shard_key
+from ..services.sync_service import get_sync_service
 from ..services import file_handler
 from ..services.node_manager import get_node_manager
 
@@ -62,6 +67,214 @@ access_logger = logging.getLogger("storage.access")
 
 # Storage Node identifier
 STORAGE_ID = os.getenv("STORAGE_ID", os.getenv("SERVER_ID", "storage_1"))
+HOST_ID = os.getenv("HOST_ID", os.getenv("PHYSICAL_HOST", socket.gethostname()))
+
+# ============================================================================
+# SHARD MEMBERSHIP CACHE
+# ============================================================================
+# Cache ligero para evitar validaciones DNS repetitivas en lecturas
+# Formato: {shard_id: {"data": {...}, "epoch": int, "cached_at": float}}
+_shard_membership_cache = {}
+SHARD_CACHE_TTL = 5.0  # 5 segundos de cache
+
+
+def _ensure_shard_membership(shard_id: Optional[str], require_primary: bool = False):
+    """Verifica que este nodo pertenezca (y opcionalmente sea primario) del shard.
+    
+    Utiliza cache ligero con TTL de 5s para evitar validaciones DNS repetitivas.
+    El cache se invalida automáticamente si el epoch del shard cambia.
+    """
+    if not shard_id:
+        return
+
+    import time
+    current_time = time.time()
+    
+    # Verificar si hay entrada en cache válida
+    cached = _shard_membership_cache.get(shard_id)
+    if cached and (current_time - cached["cached_at"]) < SHARD_CACHE_TTL:
+        data = cached["data"]
+        # Validar membership y primary usando datos cacheados
+        replicas = data.get("replicas", [])
+        primary_id = data.get("primary")
+        primary_url = data.get("primary_url")
+        shard_epoch = data.get("epoch", 0)
+        
+        if STORAGE_ID not in replicas:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "not_shard_member",
+                    "message": f"Storage {STORAGE_ID} no es replica del shard {shard_id}",
+                    "replicas": replicas,
+                    "primary": primary_id,
+                },
+            )
+        
+        if require_primary and STORAGE_ID != primary_id:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "not_shard_primary",
+                    "message": f"Storage {STORAGE_ID} no es el primary del shard {shard_id}",
+                    "primary": primary_id,
+                    "primary_url": primary_url,
+                },
+            )
+        
+        return {"epoch": shard_epoch, "primary": primary_id, "replicas": replicas}
+
+    # Cache miss o expirado: consultar DNS
+    dns_alias = os.getenv("DNS_ALIAS", "dns")
+    dns_port = int(os.getenv("DNS_SERVICE_PORT", 5353))
+    url = f"http://{dns_alias}:{dns_port}/shard/resolve/{shard_id}"
+
+    try:
+        resp = httpx.get(url, timeout=3.0)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.warning("No se pudo validar shard %s contra DNS: %s", shard_id, exc)
+        raise HTTPException(status_code=503, detail="Shard membership validation failed")
+
+    replicas = data.get("replicas", [])
+    primary_id = data.get("primary")
+    primary_url = data.get("primary_url")
+    shard_epoch = data.get("epoch", 0)
+    
+    # Invalidar cache si el epoch cambió
+    if cached and cached["epoch"] != shard_epoch:
+        logger.debug(f"Invalidando cache de shard {shard_id}: epoch {cached['epoch']} -> {shard_epoch}")
+        _shard_membership_cache.pop(shard_id, None)
+    
+    # Actualizar cache
+    _shard_membership_cache[shard_id] = {
+        "data": data,
+        "epoch": shard_epoch,
+        "cached_at": current_time,
+    }
+
+    if STORAGE_ID not in replicas:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "not_shard_member",
+                "message": f"Storage {STORAGE_ID} no es replica del shard {shard_id}",
+                "replicas": replicas,
+                "primary": primary_id,
+            },
+        )
+    
+    # CRITICAL FIX: Validar primary ANTES del return
+    if require_primary and STORAGE_ID != primary_id:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "not_shard_primary",
+                "message": f"Storage {STORAGE_ID} no es el primary del shard {shard_id}",
+                "primary": primary_id,
+                "primary_url": primary_url,
+            },
+        )
+    
+    return {"epoch": shard_epoch, "primary": primary_id, "replicas": replicas}
+
+
+def _ensure_shard_membership_or_redirect(shard_id: Optional[str], require_primary: bool = False):
+    """"    Igual que _ensure_shard_membership pero devuelve redirect 307 si el nodo no pertenece al shard.
+    Pensado para endpoints de lectura. Usa el mismo cache que _ensure_shard_membership.
+    """
+    if not shard_id:
+        return None
+
+    import time
+    current_time = time.time()
+    
+    # Verificar cache
+    cached = _shard_membership_cache.get(shard_id)
+    if cached and (current_time - cached["cached_at"]) < SHARD_CACHE_TTL:
+        data = cached["data"]
+        replicas = data.get("replicas", [])
+        primary_id = data.get("primary")
+        primary_url = data.get("primary_url")
+        
+        if STORAGE_ID not in replicas or (require_primary and STORAGE_ID != primary_id):
+            detail = {
+                "error": "wrong_shard",
+                "message": f"Storage {STORAGE_ID} no es miembro del shard {shard_id}",
+                "replicas": replicas,
+                "primary": primary_id,
+                "primary_url": primary_url,
+            }
+            if primary_url:
+                raise HTTPException(status_code=307, detail=detail, headers={"Location": primary_url})
+            raise HTTPException(status_code=403, detail=detail)
+        
+        return data
+
+    # Cache miss: consultar DNS
+    dns_alias = os.getenv("DNS_ALIAS", "dns")
+    dns_port = int(os.getenv("DNS_SERVICE_PORT", 5353))
+    url = f"http://{dns_alias}:{dns_port}/shard/resolve/{shard_id}"
+
+    try:
+        resp = httpx.get(url, timeout=3.0)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.warning("No se pudo validar shard %s contra DNS: %s", shard_id, exc)
+        
+        # FAIL-OPEN READS: Si DNS no responde y tenemos cache (aunque expirado), usarlo para lecturas
+        if cached and not require_primary:
+            logger.info(
+                f"[RESILIENT READ] Usando cache expirado para shard {shard_id} "
+                f"(edad: {current_time - cached['cached_at']:.1f}s)"
+            )
+            data = cached["data"]
+            replicas = data.get("replicas", [])
+            
+            # Validar membership con datos cacheados
+            if STORAGE_ID not in replicas:
+                raise HTTPException(
+                    status_code=503, 
+                    detail="DNS unreachable and node not in cached replica set"
+                )
+            
+            return data
+        
+        # FAIL-CLOSED WRITES: Para escrituras o sin cache, rechazar
+        raise HTTPException(status_code=503, detail="Shard membership validation failed")
+
+    replicas = data.get("replicas", [])
+    primary_id = data.get("primary")
+    primary_url = data.get("primary_url")
+    shard_epoch = data.get("epoch", 0)
+    
+    # Invalidar cache si epoch cambió
+    if cached and cached["epoch"] != shard_epoch:
+        _shard_membership_cache.pop(shard_id, None)
+    
+    # Actualizar cache
+    _shard_membership_cache[shard_id] = {
+        "data": data,
+        "epoch": shard_epoch,
+        "cached_at": current_time,
+    }
+
+    if STORAGE_ID not in replicas or (require_primary and STORAGE_ID != primary_id):
+        detail = {
+            "error": "wrong_shard",
+            "message": f"Storage {STORAGE_ID} no es miembro del shard {shard_id}",
+            "replicas": replicas,
+            "primary": primary_id,
+            "primary_url": primary_url,
+        }
+        if primary_url:
+            # Redirigir al primario conocido
+            raise HTTPException(status_code=307, detail=detail, headers={"Location": primary_url})
+        raise HTTPException(status_code=403, detail=detail)
+
+    return data
 
 app = FastAPI(
     title="Storage Node API",
@@ -131,6 +344,11 @@ async def startup_event():
     """Initialize database and sync files on startup."""
     init_db()
     summary = sync()
+    # Register this storage node locally for shard placement/host awareness
+    try:
+        upsert_storage_node(node_id=STORAGE_ID, host_id=HOST_ID, status="up")
+    except Exception as exc:
+        logger.warning("Could not register storage node metadata: %s", exc)
     logger.info(
         "Storage Node %s initialized. DB synced: %s",
         STORAGE_ID,
@@ -174,6 +392,7 @@ def list_files_endpoint(
     List all files in this Storage Node.
     Optionally filter by shard_id for sharded deployments.
     """
+    _ensure_shard_membership_or_redirect(shard_id)
     results = list_files(shard_id=shard_id)
     
     client_host = request.client.host if request.client else "-"
@@ -189,6 +408,8 @@ def list_files_endpoint(
 @app.get("/files/{file_id}", response_model=FileMetadata)
 def get_file_endpoint(file_id: str, request: Request):
     """Get metadata for a specific file."""
+    shard_id = request.query_params.get("shard_id")
+    _ensure_shard_membership_or_redirect(shard_id)
     record = get_file(file_id)
     if not record:
         raise HTTPException(status_code=404, detail="File not found")
@@ -199,6 +420,9 @@ def get_file_endpoint(file_id: str, request: Request):
 @app.post("/files")
 def upsert_file_endpoint(payload: FileUpsertRequest):
     """Insert or update file metadata."""
+    # CRITICAL: Validar que somos PRIMARY del shard antes de escribir
+    _ensure_shard_membership(payload.shard_id, require_primary=True)
+    
     upsert_file(
         file_id=payload.file_id,
         name=payload.name,
@@ -218,6 +442,9 @@ def delete_file_endpoint(file_id: str):
     record = get_file(file_id)
     if not record:
         raise HTTPException(status_code=404, detail="File not found")
+    
+    # CRITICAL: Validar que somos PRIMARY del shard antes de eliminar
+    _ensure_shard_membership(record.get("shard_id"), require_primary=True)
     
     # Delete from database
     delete_file(file_id=file_id)
@@ -249,6 +476,7 @@ def search_files_endpoint(
     Search files by name.
     Returns matching files from this Storage Node.
     """
+    _ensure_shard_membership_or_redirect(shard_id)
     results = search_files(
         query=query,
         limit=limit,
@@ -280,6 +508,8 @@ def search_files_endpoint(
 @app.get("/files/{file_id}/download")
 def download_file_endpoint(file_id: str, request: Request):
     """Download a file by its ID."""
+    shard_id = request.query_params.get("shard_id")
+    _ensure_shard_membership_or_redirect(shard_id)
     try:
         target = file_handler.resolve_download(file_id)
     except file_handler.FileRecordNotFoundError:
@@ -319,6 +549,43 @@ async def upload_file_endpoint(
     
     FENCING: Only accepts writes if node is PRIMARY with valid lease.
     """
+    num_shards = int(os.getenv("NUM_SHARDS", 1))
+    shard_strategy = os.getenv("SHARD_STRATEGY", os.getenv("SHARD_ASSIGN_STRATEGY", "hash"))
+
+    if not shard_id and num_shards > 1:
+        # Calcular shard determinístico si no viene informado
+        path_for_hash = f"{folder}/{file.filename}" if folder else file.filename
+        shard_id = compute_shard_key(path_for_hash, strategy=shard_strategy)
+        if shard_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "missing_shard",
+                    "message": "Shard id is required when sharding is enabled",
+                },
+            )
+
+    # Validar pertenencia/rol por shard (si aplica)
+    shard_info = _ensure_shard_membership(shard_id, require_primary=True)
+    
+    # EPOCH FENCING: Validar que nuestro epoch no esté atrasado respecto al shard
+    if shard_info:
+        shard_epoch = shard_info.get("epoch", 0)
+        node_mgr = get_node_manager()
+        if node_mgr.primary_epoch and node_mgr.primary_epoch < shard_epoch:
+            logger.warning(
+                f"[EPOCH FENCING] Upload rejected: write_epoch {node_mgr.primary_epoch} < shard_epoch {shard_epoch}"
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "stale_epoch",
+                    "message": "Storage node epoch is behind shard epoch",
+                    "storage_epoch": node_mgr.primary_epoch,
+                    "shard_epoch": shard_epoch,
+                }
+            )
+
     # Fencing: validar rol y lease
     node_mgr = get_node_manager()
     if not node_mgr.is_primary:
@@ -386,6 +653,22 @@ async def upload_file_endpoint(
         )
         
         logger.info("File %s uploaded successfully (hash=%s, epoch=%s)", file.filename, content_hash[:8], node_mgr.primary_epoch)
+        
+        # Notificar a DNS sobre el shard placement con origin_node
+        if shard_id:
+            try:
+                dns_alias = os.getenv("DNS_ALIAS", "dns")
+                dns_port = int(os.getenv("DNS_SERVICE_PORT", 5353))
+                dns_url = f"http://{dns_alias}:{dns_port}/shard/update"
+                
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    await client.post(dns_url, json={
+                        "shard_id": shard_id,
+                        "origin_node": STORAGE_ID,
+                    })
+                    logger.debug(f"Notificado DNS sobre shard {shard_id} con origin_node={STORAGE_ID}")
+            except Exception as exc:
+                logger.warning(f"No se pudo notificar DNS sobre shard {shard_id}: {exc}")
         
         client_host = request.client.host if request.client else "-"
         access_logger.info(
@@ -718,6 +1001,10 @@ async def replicate_file_from_peer(
     full_path = _resolve_safe_relative_path(relative_path)
     modified_dt = _parse_iso_datetime(last_modified)
 
+    # CRITICAL: Validar que somos PRIMARY del shard para aceptar replicación
+    # (el BACKUP empuja al PRIMARY, no al revés)
+    _ensure_shard_membership(shard_id, require_primary=True)
+
     try:
         # Read content for hash verification/calculation
         content = await file.read()
@@ -825,6 +1112,9 @@ async def trigger_resync():
     """
     Trigger a resync of the file system with the database.
     Useful after manual file operations.
+    
+    NOTA: Este endpoint es solo para operaciones internas/admin,
+    no requiere validación de shard ya que sincroniza TODO el nodo.
     """
     try:
         summary = sync()
@@ -837,6 +1127,61 @@ async def trigger_resync():
     except Exception as e:
         logger.error("[SYNC] Resync error: %s", e)
         raise HTTPException(status_code=500, detail=f"Resync error: {str(e)}")
+
+
+@app.post("/internal/full-sync")
+async def trigger_full_sync(request: Request, primary_url: Optional[str] = None):
+    """Forzar un full_sync usando SyncService con el primary indicado."""
+    sync_service = get_sync_service()
+    source = primary_url or request.query_params.get("primary_url")
+
+    if not source:
+        raise HTTPException(status_code=400, detail="primary_url es requerido")
+
+    try:
+        sync_service.set_primary_url(source)
+        ok = await sync_service.full_sync()
+        if not ok:
+            raise HTTPException(status_code=503, detail="full_sync falló")
+
+        return {
+            "status": "synced",
+            "storage_id": STORAGE_ID,
+            "primary_url": source,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("[SYNC] Error en full_sync manual: %s", exc)
+        raise HTTPException(status_code=500, detail="Error ejecutando full_sync")
+
+
+@app.post("/internal/replicate-shard")
+async def trigger_shard_replication(
+    request: Request,
+    shard_id: str = Query(...),
+    source_node_url: str = Query(...),
+):
+    """
+    Trigger replication for a specific shard from source node.
+    
+    Used by DNS after placement changes to sync only the affected shard.
+    More efficient than full-sync for targeted updates.
+    """
+    sync_service = get_sync_service()
+    
+    logger.info(f"Shard replication requested: {shard_id} from {source_node_url}")
+    
+    result = await sync_service.replicate_shard(shard_id, source_node_url)
+    
+    return {
+        "status": "success" if result["errors"] == 0 else "partial",
+        "shard_id": shard_id,
+        "source_node_url": source_node_url,
+        "downloaded": result["downloaded"],
+        "skipped": result["skipped"],
+        "errors": result["errors"],
+    }
 
 
 # ============================================================================

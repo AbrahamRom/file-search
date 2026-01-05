@@ -22,6 +22,8 @@ _env_root = os.getenv("FILES_ROOT")
 _volume_root = Path("/app/files")
 _fallback_root = Path(__file__).resolve().parents[2] / "files"
 
+SHARD_STRATEGY = os.getenv("SHARD_STRATEGY", os.getenv("SHARD_ASSIGN_STRATEGY", "hash"))
+
 if _env_root:
     FILES_ROOT = Path(_env_root)
 elif _volume_root.exists():
@@ -105,13 +107,15 @@ def _iter_file_records(
         stat = file_path.stat()
         last_modified = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
 
+        effective_shard = shard_id or compute_shard_key(relative_path, strategy=SHARD_STRATEGY)
+
         yield FileRecord(
             file_id=compute_file_id(relative_path),
             name=file_path.name,
             path=str(file_path.resolve()),
             size=stat.st_size,
             last_modified=last_modified,
-            shard_id=shard_id,
+            shard_id=effective_shard,
         )
 
 
@@ -138,10 +142,14 @@ def sync(
     """
     Synchronize the database with the files currently present on disk.
     
+    SHARD FILTERING: Solo sincroniza archivos cuyos shards pertenecen a este nodo.
+    Consulta DNS para verificar membership antes de registrar en DB.
+    
     Returns a dictionary summarizing the operation:
         - discovered: number of files found on disk
         - upserted: number of records upserted in the database
         - deleted: number of records removed for files no longer present
+        - skipped: number of files skipped (not member of shard)
     """
     target_root = root or FILES_ROOT
     records = scan(target_root, shard_id)
@@ -151,8 +159,43 @@ def sync(
     existing_ids: Set[str] = crud.list_file_ids()
     seen_ids: Set[str] = set()
     upserted = 0
+    skipped = 0
+    
+    # Obtener STORAGE_ID para verificar membership
+    storage_id = os.getenv("STORAGE_ID", os.getenv("SERVER_ID", "storage_1"))
+    dns_alias = os.getenv("DNS_ALIAS", "dns")
+    dns_port = int(os.getenv("DNS_SERVICE_PORT", 5353))
 
     for record in records:
+        # Verificar membership del shard si está configurado
+        if record.shard_id:
+            try:
+                import httpx
+                url = f"http://{dns_alias}:{dns_port}/shard/resolve/{record.shard_id}"
+                resp = httpx.get(url, timeout=3.0)
+                
+                if resp.status_code == 200:
+                    data = resp.json()
+                    replicas = data.get("replicas", [])
+                    
+                    if storage_id not in replicas:
+                        logger.debug(
+                            f"Skipping file {record.name} (shard {record.shard_id}): "
+                            f"not a member (replicas={replicas})"
+                        )
+                        skipped += 1
+                        continue
+                else:
+                    logger.warning(
+                        f"No se pudo verificar shard {record.shard_id} para {record.name}: {resp.status_code}"
+                    )
+                    # Si no podemos verificar, registramos de todos modos (fail-open)
+            except Exception as exc:
+                logger.warning(
+                    f"Error verificando shard membership para {record.name}: {exc}"
+                )
+                # Fail-open: si no podemos verificar, registramos
+        
         seen_ids.add(record.file_id)
         crud.upsert_file(
             file_id=record.file_id,
@@ -170,16 +213,18 @@ def sync(
         deleted += 1
 
     logger.info(
-        "Scan complete: discovered=%d, upserted=%d, deleted=%d",
+        "Scan complete: discovered=%d, upserted=%d, deleted=%d, skipped=%d",
         len(records),
         upserted,
         deleted,
+        skipped,
     )
 
     return {
         "discovered": len(records),
         "upserted": upserted,
         "deleted": deleted,
+        "skipped": skipped,
     }
 
 

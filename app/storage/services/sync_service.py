@@ -291,8 +291,7 @@ class SyncService:
         return {"downloaded": downloaded, "pushed": pushed, "conflicted": conflicted, "errors": errors}
     
     async def reconcile_missing_files(self) -> Dict[str, int]:
-        """
-        Reconcile files that are in DB but missing on disk.
+        """        Reconcile files that are in DB but missing on disk.
         
         After a network partition, the DB may have been synced but physical files
         might be missing. This method attempts to download them from ANY available
@@ -400,6 +399,143 @@ class SyncService:
             logger.error(f"[SyncService] Error in reconciliation: {e}")
         
         return {"downloaded": downloaded, "errors": errors, "missing": len(missing_files) if 'missing_files' in dir() else 0}
+    
+    async def replicate_shard(self, shard_id: str, source_node_url: str) -> Dict[str, int]:
+        """
+        Replicate files for a specific shard from a source node.
+        
+        Used after placement changes or failover to sync only the affected shard.
+        More efficient than full_sync when only one shard needs updating.
+        
+        Args:
+            shard_id: The shard identifier to replicate
+            source_node_url: URL of the source storage node (usually the new primary)
+            
+        Returns:
+            Dict with downloaded, skipped, errors counts
+        """
+        from ..db.crud import list_files, upsert_file
+        from ..services.scanner import compute_file_id
+        
+        downloaded = 0
+        skipped = 0
+        errors = 0
+        
+        logger.info(f"[SyncService] Replicating shard {shard_id} from {source_node_url}...")
+        
+        def _parse_remote_mtime(value: str) -> Optional[float]:
+            if not value:
+                return None
+            try:
+                dt = datetime.fromisoformat(value)
+            except Exception:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        
+        def _safe_file_url(relative_path: str) -> str:
+            from urllib.parse import quote
+            return f"{source_node_url}/internal/file/{quote(relative_path, safe='/')}"
+        
+        try:
+            async with httpx.AsyncClient(timeout=SYNC_TIMEOUT) as client:
+                # Get files for this shard from source node
+                response = await client.get(f"{source_node_url}/internal/files", params={"shard_id": shard_id})
+                
+                if response.status_code != 200:
+                    logger.error(f"[SyncService] Error getting file list for shard {shard_id}: {response.status_code}")
+                    return {"downloaded": 0, "skipped": 0, "errors": 1}
+                
+                remote_files = response.json().get("files", [])
+                logger.info(f"[SyncService] Shard {shard_id} has {len(remote_files)} files to replicate")
+                
+                tolerance = 0.001
+                
+                for remote_file in remote_files:
+                    relative_path = remote_file["relative_path"]
+                    remote_size = remote_file["size"]
+                    remote_mtime = _parse_remote_mtime(remote_file.get("last_modified"))
+                    remote_hash = remote_file.get("content_hash")
+                    
+                    local_path = FILES_ROOT / relative_path
+                    
+                    # Decide if we need to download
+                    should_download = False
+                    
+                    if not local_path.exists():
+                        should_download = True
+                    else:
+                        stat = local_path.stat()
+                        local_mtime = stat.st_mtime
+                        local_size = stat.st_size
+                        
+                        # Check hash if available
+                        if remote_hash and local_path.is_file():
+                            try:
+                                with open(local_path, "rb") as f:
+                                    local_hash = hashlib.sha256(f.read()).hexdigest()
+                                
+                                if local_hash != remote_hash:
+                                    should_download = True
+                            except Exception as e:
+                                logger.warning(f"[SyncService] Error calculating hash: {e}")
+                                should_download = True
+                        elif remote_mtime and abs(remote_mtime - local_mtime) > tolerance:
+                            should_download = True
+                        elif local_size != remote_size:
+                            should_download = True
+                    
+                    if should_download:
+                        try:
+                            file_response = await client.get(_safe_file_url(relative_path))
+                            
+                            if file_response.status_code == 200:
+                                local_path.parent.mkdir(parents=True, exist_ok=True)
+                                
+                                with open(local_path, "wb") as f:
+                                    f.write(file_response.content)
+                                
+                                # Preserve remote mtime
+                                if remote_mtime is not None:
+                                    try:
+                                        os.utime(local_path, (remote_mtime, remote_mtime))
+                                    except Exception:
+                                        pass
+                                
+                                # Update DB
+                                file_id = compute_file_id(relative_path)
+                                upsert_file(
+                                    file_id=file_id,
+                                    name=local_path.name,
+                                    path=str(local_path.resolve()),
+                                    size=local_path.stat().st_size,
+                                    last_modified=datetime.fromtimestamp(remote_mtime, tz=timezone.utc) if remote_mtime else datetime.now(timezone.utc),
+                                    shard_id=shard_id,
+                                    content_hash=remote_hash,
+                                )
+                                
+                                downloaded += 1
+                                logger.debug(f"[SyncService] Downloaded: {relative_path}")
+                            else:
+                                errors += 1
+                                logger.warning(f"[SyncService] Error downloading {relative_path}: {file_response.status_code}")
+                        except Exception as e:
+                            errors += 1
+                            logger.error(f"[SyncService] Error downloading {relative_path}: {e}")
+                    else:
+                        skipped += 1
+                
+                logger.info(
+                    f"[SyncService] Shard {shard_id} replication complete: "
+                    f"{downloaded} downloaded, {skipped} skipped, {errors} errors"
+                )
+                
+        except Exception as e:
+            logger.error(f"[SyncService] Error replicating shard {shard_id}: {e}")
+            errors += 1
+        
+        return {"downloaded": downloaded, "skipped": skipped, "errors": errors}
     
     async def full_sync(self) -> bool:
         """

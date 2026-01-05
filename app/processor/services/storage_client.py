@@ -30,6 +30,7 @@ import httpx
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from common.resolver import DNSClientHA
+from storage.services.scanner import compute_shard_key
 
 from .circuit_breaker import (
     CircuitBreaker,
@@ -44,6 +45,7 @@ logger = logging.getLogger(__name__)
 STORAGE_TIMEOUT = float(os.getenv("STORAGE_TIMEOUT", 10.0))
 MAX_RETRIES = int(os.getenv("STORAGE_MAX_RETRIES", 3))
 RETRY_DELAY = float(os.getenv("STORAGE_RETRY_DELAY", 0.5))
+SHARD_STRATEGY = os.getenv("SHARD_STRATEGY", os.getenv("SHARD_ASSIGN_STRATEGY", "hash"))
 
 
 class StorageError(Exception):
@@ -143,6 +145,13 @@ class StorageClient:
         
         self._current_storage_id = storage_info["server_id"]
         return storage_info["url"], storage_info["server_id"]
+
+    def _compute_shard_id(self, filename: str, folder: Optional[str]) -> Optional[str]:
+        """Compute deterministic shard id for uploads based on file path."""
+        if not filename:
+            return None
+        path_for_hash = f"{folder}/{filename}" if folder else filename
+        return compute_shard_key(path_for_hash, strategy=SHARD_STRATEGY)
     
     async def _make_request(
         self,
@@ -150,6 +159,7 @@ class StorageClient:
         path: str,
         storage_url: str,
         storage_id: str,
+        shard_id: Optional[str] = None,
         **kwargs,
     ) -> httpx.Response:
         """
@@ -168,8 +178,20 @@ class StorageClient:
             try:
                 response = await self._http_client.request(method, url, **kwargs)
                 
-                # Handle fencing errors (409 Conflict = lease expired, 503 = not primary)
-                if response.status_code in (409, 503):
+                    # Handle shard redirects on reads (307/302)
+                if response.status_code in (302, 307):
+                    location = response.headers.get("Location")
+                    if shard_id and location:
+                        logger.info(
+                        "Shard redirect (%s) to %s for shard %s",
+                        response.status_code,
+                        location,
+                        shard_id,
+                    )
+                    raise StorageRequestError("Shard redirect", storage_id, response.status_code)
+                
+                # Handle fencing/shard errors (409 lease, 503 not primary, 403 wrong shard)
+                if response.status_code in (409, 503, 403):
                     try:
                         error_detail = response.json()
                         error_type = error_detail.get("detail", {}).get("error") if isinstance(error_detail.get("detail"), dict) else None
@@ -181,6 +203,18 @@ class StorageClient:
                             )
                             raise StorageRequestError(
                                 f"Fencing error: {error_type}",
+                                storage_id,
+                                response.status_code,
+                            )
+                        if error_type in ("wrong_shard", "not_shard_member", "not_shard_primary") and shard_id:
+                            logger.warning(
+                                "[SHARD] Wrong shard response from %s (error=%s) for shard %s",
+                                storage_id,
+                                error_type,
+                                shard_id,
+                            )
+                            raise StorageRequestError(
+                                f"Shard redirect needed: {error_type}",
                                 storage_id,
                                 response.status_code,
                             )
@@ -206,6 +240,8 @@ class StorageClient:
         self,
         method: str,
         path: str,
+        shard_id: Optional[str] = None,
+        prefer_primary: bool = True,
         **kwargs,
     ) -> httpx.Response:
         """
@@ -232,10 +268,19 @@ class StorageClient:
             try:
                 # Get current Storage Node from DNS
                 # Si hubo error de fencing, excluir ese storage y buscar alternativo
-                storage_url, storage_id = self._get_storage_info(
-                    force_refresh=dns_refreshed,
-                    exclude_storage_id=failed_storage_id
-                )
+                if shard_id:
+                    target = self.dns_client.resolve_shard(shard_id, prefer_primary=prefer_primary)
+                    if not target or not target.get("url"):
+                        raise StorageUnavailableError(f"No storage placement available for shard {shard_id}")
+                    storage_url = target["url"]
+                    storage_id = target["server_id"]
+                else:
+                    storage_url, storage_id = self._get_storage_info(
+                        force_refresh=dns_refreshed,
+                        exclude_storage_id=failed_storage_id
+                    )
+
+                self._current_storage_id = storage_id
                 
                 logger.debug(
                     "Request to %s: %s %s (attempt %d, dns_refreshed=%s, excluded=%s)",
@@ -248,8 +293,9 @@ class StorageClient:
                 )
                 
                 response = await self._make_request(
-                    method, path, storage_url, storage_id, **kwargs
+                    method, path, storage_url, storage_id, shard_id=shard_id, **kwargs
                 )
+                # Successful response
                 return response
                 
             except CircuitBreakerOpen as e:
@@ -266,6 +312,8 @@ class StorageClient:
                         "Circuit breaker open - invalidating DNS cache and re-resolving"
                     )
                     self.dns_client.invalidate_storage_cache(storage_id if 'storage_id' in dir() else None)
+                    if shard_id:
+                        self.dns_client.invalidate_shard_cache(shard_id)
                     dns_refreshed = True
                     await asyncio.sleep(self.retry_delay)
                     continue
@@ -292,18 +340,35 @@ class StorageClient:
                         f"Fencing error from {storage_id} - will search for alternative Storage"
                     )
                     self.dns_client.invalidate_storage_cache(storage_id)
+                    if shard_id:
+                        self.dns_client.invalidate_shard_cache(shard_id)
                     dns_refreshed = True
                     
                     if attempt < self.max_retries:
                         await asyncio.sleep(self.retry_delay)
                     continue
                 
+                # Shard redirect / wrong shard handling: re-resolver shard y reintentar
+                is_shard_redirect = (
+                    isinstance(e, StorageRequestError)
+                    and str(e).startswith("Shard redirect")
+                )
+
+                if is_shard_redirect and shard_id:
+                    self.dns_client.invalidate_shard_cache(shard_id)
+                    dns_refreshed = True
+                    if attempt < self.max_retries:
+                        await asyncio.sleep(self.retry_delay)
+                    continue
+
                 # Si no es fencing y no hemos refrescado DNS, hacerlo
                 if not dns_refreshed and isinstance(e, StorageRequestError):
                     logger.info(
                         "Storage request failed - invalidating DNS cache for failover"
                     )
                     self.dns_client.invalidate_storage_cache(self._current_storage_id)
+                    if shard_id:
+                        self.dns_client.invalidate_shard_cache(shard_id)
                     dns_refreshed = True
                 
                 if attempt < self.max_retries:
@@ -335,13 +400,24 @@ class StorageClient:
         if shard_id:
             params["shard_id"] = shard_id
         
-        response = await self._request_with_dns_failover("GET", "/files", params=params)
+        response = await self._request_with_dns_failover(
+            "GET",
+            "/files",
+            params=params,
+            shard_id=shard_id,
+            prefer_primary=False,  # reads pueden ir a cualquier replica
+        )
         response.raise_for_status()
         return response.json()
     
-    async def get_file(self, file_id: str) -> Optional[Dict]:
-        """Get file metadata by ID."""
-        response = await self._request_with_dns_failover("GET", f"/files/{file_id}")
+    async def get_file(self, file_id: str, shard_id: Optional[str] = None) -> Optional[Dict]:
+        """Get file metadata by ID (optionally scoped to shard)."""
+        response = await self._request_with_dns_failover(
+            "GET",
+            f"/files/{file_id}",
+            shard_id=shard_id,
+            prefer_primary=False,
+        )
         
         if response.status_code == 404:
             return None
@@ -361,11 +437,17 @@ class StorageClient:
         if shard_id:
             params["shard_id"] = shard_id
         
-        response = await self._request_with_dns_failover("GET", "/search", params=params)
+        response = await self._request_with_dns_failover(
+            "GET",
+            "/search",
+            params=params,
+            shard_id=shard_id,
+            prefer_primary=False,
+        )
         response.raise_for_status()
         return response.json()
     
-    async def download_file(self, file_id: str) -> bytes:
+    async def download_file(self, file_id: str, shard_id: Optional[str] = None) -> bytes:
         """
         Download file content with multi-storage fallback.
         
@@ -380,6 +462,8 @@ class StorageClient:
             response = await self._request_with_dns_failover(
                 "GET",
                 f"/files/{file_id}/download",
+                shard_id=shard_id,
+                prefer_primary=False,
             )
             
             # Check for "file not on disk" error (404 with specific message)
@@ -412,17 +496,29 @@ class StorageClient:
             logger.info(f"[DOWNLOAD] Attempting multi-storage fallback for {file_id}")
             
             tried_storages = {self._current_storage_id}
-            all_storages = self.dns_client.list_storage_servers()
-            
-            for storage_info in all_storages:
+
+            alternative_nodes: List[Dict[str, Any]] = []
+            if shard_id:
+                placement = self.dns_client.resolve_shard(shard_id, prefer_primary=False)
+                if placement:
+                    nodes = placement.get("nodes") or {}
+                    for sid in placement.get("replicas", []) or []:
+                        node = nodes.get(sid, {})
+                        alt_url = node.get("url")
+                        if alt_url:
+                            alternative_nodes.append({"server_id": sid, "url": alt_url})
+            if not alternative_nodes:
+                alternative_nodes = self.dns_client.list_storage_servers()
+
+            for storage_info in alternative_nodes:
                 storage_id = storage_info.get("server_id")
                 storage_url = storage_info.get("url")
-                
+
                 if not storage_url or storage_id in tried_storages:
                     continue
-                
+
                 tried_storages.add(storage_id)
-                
+
                 try:
                     logger.info(f"[DOWNLOAD] Trying storage {storage_id} at {storage_url}")
                     
@@ -462,6 +558,8 @@ class StorageClient:
         data = {}
         if folder:
             data["folder"] = folder
+        if not shard_id:
+            shard_id = self._compute_shard_id(filename, folder)
         if shard_id:
             data["shard_id"] = shard_id
         
@@ -470,13 +568,20 @@ class StorageClient:
             "/upload",
             files=files,
             data=data,
+            shard_id=shard_id,
+            prefer_primary=True,
         )
         response.raise_for_status()
         return response.json()
     
-    async def delete_file(self, file_id: str) -> bool:
+    async def delete_file(self, file_id: str, shard_id: Optional[str] = None) -> bool:
         """Delete a file."""
-        response = await self._request_with_dns_failover("DELETE", f"/files/{file_id}")
+        response = await self._request_with_dns_failover(
+            "DELETE",
+            f"/files/{file_id}",
+            shard_id=shard_id,
+            prefer_primary=True,
+        )
         return response.status_code == 200
     
     async def upsert_file(self, file_data: Dict) -> Dict:
@@ -485,6 +590,8 @@ class StorageClient:
             "POST",
             "/files",
             json=file_data,
+            shard_id=file_data.get("shard_id"),
+            prefer_primary=True,
         )
         response.raise_for_status()
         return response.json()

@@ -48,6 +48,12 @@ class DNSClientHA:
         
         # Cache de resoluciones
         self._cache: Dict[str, Dict[str, Any]] = {}
+
+        # Cache de shard map
+        self._shard_cache: Dict[str, dict] = {}
+        self._shard_cache_epoch: int = 0
+        self._shard_cache_ts: float = 0.0
+        self._shard_cache_ttl: float = 5.0
         
         # Lock para thread-safety
         self._lock = threading.Lock()
@@ -113,6 +119,9 @@ class DNSClientHA:
             self._dns_servers = []
             self._primary_url = None
             self._cache = {}
+            self._shard_cache = {}
+            self._shard_cache_epoch = 0
+            self._shard_cache_ts = 0.0
             self._bootstrapped = False
         
         # Re-ejecutar bootstrap
@@ -655,6 +664,146 @@ class DNSClientHA:
         
         logger.warning(f"[DNSClientHA] No se encontró Storage alternativo (excluido: {exclude_storage_id})")
         return None
+
+    # =========================================================================
+    # RESOLUCIÓN DE SHARDS
+    # =========================================================================
+
+    def _try_resolve_shard(self, dns_url: str, shard_id: str) -> Optional[Dict[str, Any]]:
+        """Resuelve placement de un shard desde un DNS específico."""
+        try:
+            response = requests.get(f"{dns_url}/shard/resolve/{shard_id}", timeout=3.0)
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            data = response.json()
+            return data
+        except requests.Timeout:
+            self._mark_server_unhealthy(dns_url)
+            return None
+        except Exception as e:
+            logger.warning(f"[DNSClientHA] Error resolviendo shard {shard_id} desde {dns_url}: {e}")
+            self._mark_server_unhealthy(dns_url)
+            return None
+
+    def resolve_shard(self, shard_id: str, prefer_primary: bool = True) -> Optional[Dict[str, Any]]:
+        """
+        Resuelve placement de un shard y retorna un nodo objetivo.
+
+        Returns dict with selected {server_id, url, role, shard_epoch, placement}.
+        """
+        self._maybe_refresh_servers()
+
+        cache_key = f"__shard::{shard_id}"
+        with self._lock:
+            cached = self._cache.get(cache_key)
+            if cached and time.time() < cached["expires_at"]:
+                return cached["data"]
+
+        # Intentar con primario
+        candidate_response = None
+        if self._primary_url:
+            candidate_response = self._try_resolve_shard(self._primary_url, shard_id)
+
+        if not candidate_response:
+            with self._lock:
+                servers_copy = list(self._dns_servers)
+
+            for server in servers_copy:
+                url = server.get("url")
+                if not url:
+                    continue
+                candidate_response = self._try_resolve_shard(url, shard_id)
+                if candidate_response:
+                    break
+
+        if not candidate_response:
+            return None
+
+        # Elegir target: primary o primera réplica disponible
+        target_id = candidate_response.get("primary") if prefer_primary else None
+        target_url = candidate_response.get("primary_url") if prefer_primary else None
+        target_role = "PRIMARY" if prefer_primary else "REPLICA"
+
+        if not prefer_primary:
+            replicas = candidate_response.get("replicas") or []
+            replica_urls = candidate_response.get("replica_urls") or []
+            for sid, url in zip(replicas, replica_urls or []):
+                if url:
+                    target_id = sid
+                    target_url = url
+                    target_role = "REPLICA"
+                    break
+
+        if not target_id or not target_url:
+            # fallback to primary if missing urls
+            target_id = candidate_response.get("primary")
+            target_url = candidate_response.get("primary_url")
+            target_role = "PRIMARY"
+
+        result = {
+            "server_id": target_id,
+            "url": target_url,
+            "role": target_role,
+            "shard_id": shard_id,
+            "epoch": candidate_response.get("epoch"),
+            "placement": candidate_response,
+        }
+
+        with self._lock:
+            self._cache[cache_key] = {
+                "data": result,
+                "expires_at": time.time() + 10,
+            }
+
+        return result
+
+    def list_shards(self, force_refresh: bool = False) -> Dict[str, dict]:
+        """Obtiene el mapa de shards desde el DNS con cache ligero."""
+        self._maybe_refresh_servers()
+
+        now = time.time()
+        if not force_refresh:
+            with self._lock:
+                if self._shard_cache and (now - self._shard_cache_ts) < self._shard_cache_ttl:
+                    return dict(self._shard_cache)
+
+        with self._lock:
+            servers_copy = list(self._dns_servers)
+
+        last_error: Optional[Exception] = None
+
+        for server in servers_copy:
+            url = server.get("url")
+            if not url:
+                continue
+            try:
+                response = requests.get(f"{url}/shard/list", timeout=3.0)
+                response.raise_for_status()
+                data = response.json()
+                shards = data.get("shards") or {}
+                epoch = data.get("epoch", 0)
+                with self._lock:
+                    self._shard_cache = shards
+                    self._shard_cache_epoch = epoch
+                    self._shard_cache_ts = time.time()
+                return dict(shards)
+            except Exception as exc:
+                last_error = exc
+                self._mark_server_unhealthy(url)
+                continue
+
+        if last_error:
+            logger.warning(f"[DNSClientHA] No se pudo obtener lista de shards: {last_error}")
+
+        with self._lock:
+            return dict(self._shard_cache)
+
+    def invalidate_shard_cache(self, shard_id: str) -> None:
+        with self._lock:
+            cache_key = f"__shard::{shard_id}"
+            if cache_key in self._cache:
+                del self._cache[cache_key]
     
     def get_storage_cache_status(self) -> Dict[str, Any]:
         """Retorna el estado del cache de Storage Node."""

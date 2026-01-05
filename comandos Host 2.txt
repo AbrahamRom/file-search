@@ -22,6 +22,7 @@ docker run -d \
   -e DISCOVERY_INTERVAL=15 \
   -e API_SERVER_TIMEOUT=30 \
   -e PROCESSOR_TIMEOUT=30 \
+  -e LEASE_DURATION=30 \
   file-search-dns:latest
   
   docker run -d \
@@ -41,6 +42,7 @@ docker run -d \
   -e DISCOVERY_INTERVAL=15 \
   -e API_SERVER_TIMEOUT=30 \
   -e PROCESSOR_TIMEOUT=30 \
+  -e LEASE_DURATION=30 \
   file-search-dns:latest
   
   docker run -d \
@@ -64,6 +66,11 @@ docker run -d \
   -e HEARTBEAT_INTERVAL=5 \
   -e SYNC_INTERVAL=10 \
   -e SYNC_TIMEOUT=30 \
+  -e NUM_SHARDS=3 \
+  -e SHARD_STRATEGY=hash \
+  -e REPLICAS_REQUIRED=3 \
+  -e HOST_ID=host_2 \
+  -e SHARD_CACHE_TTL=5 \
   file-search-storage:latest
   
     docker run -d \
@@ -87,6 +94,11 @@ docker run -d \
   -e HEARTBEAT_INTERVAL=5 \
   -e SYNC_INTERVAL=10 \
   -e SYNC_TIMEOUT=30 \
+  -e NUM_SHARDS=3 \
+  -e SHARD_STRATEGY=hash \
+  -e REPLICAS_REQUIRED=3 \
+  -e HOST_ID=host_2 \
+  -e SHARD_CACHE_TTL=5 \
   file-search-storage:latest
   
   docker run -d \
@@ -108,4 +120,6 @@ docker run -d \
   -e STORAGE_MAX_RETRIES=3 \
   -e STORAGE_RETRY_DELAY=0.5 \
   -e LOG_DIR=/app/logs \
+  -e NUM_SHARDS=3 \
+  -e SHARD_STRATEGY=hash \
   file-search-processor:latest

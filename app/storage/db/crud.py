@@ -3,7 +3,8 @@ CRUD operations for Storage Node database.
 All file metadata operations are centralized here.
 """
 
-from typing import List, Optional, Set
+import json
+from typing import List, Optional, Set, Dict
 
 from .db import get_conn
 
@@ -203,6 +204,135 @@ def get_file_count() -> int:
 
 
 # ============================================================================
+# Shard and storage node metadata
+# ============================================================================
+
+def upsert_storage_node(*, node_id: str, host_id: str, status: str = "unknown", last_heartbeat: Optional[str] = None) -> None:
+    """Register or update a storage node with host affinity."""
+    sql = """
+    INSERT INTO storage_nodes (node_id, host_id, status, last_heartbeat)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(node_id) DO UPDATE SET
+        host_id = excluded.host_id,
+        status = excluded.status,
+        last_heartbeat = excluded.last_heartbeat,
+        updated_at = CURRENT_TIMESTAMP
+    """
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, (node_id, host_id, status, last_heartbeat))
+
+
+def list_storage_nodes() -> List[Dict]:
+    """Return all known storage nodes."""
+    sql = """
+    SELECT node_id, host_id, status, last_heartbeat, updated_at
+    FROM storage_nodes
+    ORDER BY node_id
+    """
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql)
+        rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+
+def upsert_shard(*, shard_id: str, primary_id: str, replica_ids: List[str], epoch: int = 0) -> None:
+    """Create or update shard placement (replica_ids must include primary)."""
+    replica_json = json.dumps(replica_ids)
+    sql = """
+    INSERT INTO shards (shard_id, primary_id, replica_ids, epoch)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(shard_id) DO UPDATE SET
+        primary_id = excluded.primary_id,
+        replica_ids = excluded.replica_ids,
+        epoch = excluded.epoch,
+        updated_at = CURRENT_TIMESTAMP
+    """
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, (shard_id, primary_id, replica_json, epoch))
+
+
+def get_shard(shard_id: str) -> Optional[Dict]:
+    """Return shard placement info."""
+    sql = """
+    SELECT shard_id, primary_id, replica_ids, epoch, updated_at
+    FROM shards
+    WHERE shard_id = ?
+    """
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, (shard_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        try:
+            data["replica_ids"] = json.loads(data.get("replica_ids", "[]"))
+        except json.JSONDecodeError:
+            data["replica_ids"] = []
+        return data
+
+
+def list_shards() -> List[Dict]:
+    """Return all shard placements."""
+    sql = """
+    SELECT shard_id, primary_id, replica_ids, epoch, updated_at
+    FROM shards
+    ORDER BY shard_id
+    """
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql)
+        rows = cur.fetchall()
+        results: List[Dict] = []
+        for row in rows:
+            data = dict(row)
+            try:
+                data["replica_ids"] = json.loads(data.get("replica_ids", "[]"))
+            except json.JSONDecodeError:
+                data["replica_ids"] = []
+            results.append(data)
+        return results
+
+
+# =========================================================================
+# Sync metadata helpers (reusable key/value store)
+# =========================================================================
+
+def set_sync_metadata(*, key: str, value: str) -> None:
+    """Insert or update a sync metadata entry."""
+    sql = """
+    INSERT INTO sync_metadata (key, value)
+    VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = CURRENT_TIMESTAMP
+    """
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, (key, value))
+
+
+def get_sync_metadata(key: str) -> Optional[str]:
+    """Return the stored metadata value for the given key (or None)."""
+    sql = "SELECT value FROM sync_metadata WHERE key = ?"
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, (key,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+# ============================================================================
 # FUTURE: Full-text search support (índice invertido)
 # ============================================================================
 
@@ -277,6 +407,13 @@ __all__ = [
     "list_file_ids",
     "search_files",
     "get_file_count",
+    "upsert_storage_node",
+    "list_storage_nodes",
+    "upsert_shard",
+    "get_shard",
+    "list_shards",
+    "set_sync_metadata",
+    "get_sync_metadata",
     # Future full-text search
     "upsert_keyword",
     "search_by_content",

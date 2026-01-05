@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 DNS_ALIAS = os.getenv("DNS_ALIAS", "dns")
 DNS_PORT = int(os.getenv("DNS_SERVICE_PORT", 5353))
 SERVER_ID = os.getenv("STORAGE_ID", os.getenv("SERVER_ID", f"storage_{socket.gethostname()}"))
+HOST_ID = os.getenv("HOST_ID", os.getenv("PHYSICAL_HOST", socket.gethostname()))
 SERVER_PORT = int(os.getenv("STORAGE_PORT", os.getenv("SERVER_PORT", 8000)))
 HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", 10))
 DNS_RETRY_INTERVAL = int(os.getenv("DNS_RETRY_INTERVAL", 3))
@@ -38,6 +39,7 @@ class NodeManager:
         self.server_port = SERVER_PORT
         self.dns_alias = DNS_ALIAS
         self.dns_port = DNS_PORT
+        self.host_id = HOST_ID
         
         self._role: str = "UNKNOWN"
         self._primary_info: Optional[Dict] = None
@@ -218,6 +220,7 @@ class NodeManager:
                         "server_id": self.server_id,
                         "ip": self._my_ip,
                         "port": self.server_port,
+                        "host_id": self.host_id,
                     },
                 )
                 
@@ -277,6 +280,7 @@ class NodeManager:
                     json={
                         "server_id": self.server_id,
                         "current_role": self._role,
+                        "host_id": self.host_id,
                     },
                 )
                 
@@ -393,6 +397,7 @@ class NodeManager:
             "server_id": self.server_id,
             "ip": self._my_ip,
             "port": self.server_port,
+            "host_id": self.host_id,
             "role": self._role,
             "registered": self._registered,
             "dns_url": self._dns_url,

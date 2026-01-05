@@ -3,11 +3,13 @@ import logging
 import os
 import time
 import asyncio
+import json
 from typing import Dict, Optional, List, Set
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel
 import httpx
+from app.storage.db import crud as db_crud
 from .logging_config import configure_logging
 
 # Configurar logs al iniciar
@@ -97,6 +99,45 @@ API_SERVER_TIMEOUT = int(os.getenv("API_SERVER_TIMEOUT", 25))
 # Timeout para processors (en segundos)
 PROCESSOR_TIMEOUT = int(os.getenv("PROCESSOR_TIMEOUT", 25))
 
+# Shard placement state (in-memory)
+shard_map: Dict[str, dict] = {}
+shard_epoch: int = 0
+shard_lock = asyncio.Lock()
+
+SHARD_EPOCH_META_KEY = "shard_global_epoch"
+
+
+def load_shard_state_from_db() -> None:
+    """Load shard_map and shard_epoch from persistent storage."""
+    global shard_map, shard_epoch
+
+    # Epoch primero
+    try:
+        stored_epoch = db_crud.get_sync_metadata(SHARD_EPOCH_META_KEY)
+        if stored_epoch is not None:
+            shard_epoch = int(stored_epoch)
+    except Exception as exc:
+        logger.warning(f"[{server_id}] No se pudo leer shard epoch persistido: {exc}")
+
+    try:
+        persisted = db_crud.list_shards()
+        for row in persisted:
+            sid = row.get("shard_id")
+            if not sid:
+                continue
+            placement = {
+                "primary": row.get("primary_id"),
+                "replicas": row.get("replica_ids", []),
+                "epoch": row.get("epoch", shard_epoch),
+                "updated_at": row.get("updated_at"),
+            }
+            shard_map[sid] = placement
+            shard_epoch = max(shard_epoch, placement.get("epoch", 0))
+        if persisted:
+            logger.info(f"[{server_id}] Shard map cargado desde DB: {len(persisted)} shards, epoch={shard_epoch}")
+    except Exception as exc:
+        logger.warning(f"[{server_id}] No se pudo cargar shard map desde DB: {exc}")
+
 # Lock para operaciones atómicas en api_servers
 api_servers_lock = asyncio.Lock()
 
@@ -132,6 +173,8 @@ class SyncData(BaseModel):
     source_id: str
     api_servers: Optional[Dict[str, dict]] = None
     processor_servers: Optional[Dict[str, dict]] = None
+    shard_map: Optional[Dict[str, dict]] = None
+    shard_epoch: Optional[int] = None
 
 
 class HealthResponse(BaseModel):
@@ -191,11 +234,13 @@ class APIServerRegisterRequest(BaseModel):
     server_id: str
     ip: str
     port: int = 8000
+    host_id: Optional[str] = None
 
 
 class APIServerHeartbeatRequest(BaseModel):
     server_id: str
     current_role: str
+    host_id: Optional[str] = None
 
 
 class APIServerInfo(BaseModel):
@@ -241,6 +286,47 @@ class ProcessorResolveResponse(BaseModel):
     url: str
     external_ip: Optional[str] = None
     external_port: Optional[int] = None
+
+
+# ============================================================================
+# MODELOS PARA SHARDS
+# ============================================================================
+
+class ShardResolveResponse(BaseModel):
+    shard_id: str
+    primary: str
+    primary_url: Optional[str] = None
+    replicas: List[str]
+    replica_urls: List[str] = []
+    epoch: int
+    nodes: Dict[str, dict] = {}
+    pending_sync: bool = False
+    sync_status: Optional[str] = None  # "synced", "pending", "failed"
+
+
+class ShardUpdateRequest(BaseModel):
+    shard_id: str
+    preferred_primary: Optional[str] = None
+    preferred_replicas: Optional[List[str]] = None
+    origin_node: Optional[str] = None  # Nodo que originó la escritura
+    
+class ShardListResponse(BaseModel):
+    epoch: int
+    shards: Dict[str, dict]
+
+
+class ShardAuditEntry(BaseModel):
+    shard_id: str
+    memory: Optional[dict] = None
+    db: Optional[dict] = None
+    issues: List[str] = []
+
+
+class ShardAuditResponse(BaseModel):
+    memory_epoch: int
+    memory_count: int
+    db_count: int
+    divergences: List[ShardAuditEntry]
 
 
 # ============================================================================
@@ -403,11 +489,58 @@ async def receive_sync(sync_data: SyncData, background_tasks: BackgroundTasks):
                     incoming_hb = info.get("last_heartbeat", "")
                     if incoming_hb > existing_hb:
                         processor_servers[pid] = info
+
+    # Sincronizar shard_map
+    if sync_data.shard_map is not None:
+        global shard_epoch
+        async with shard_lock:
+            incoming_epoch = sync_data.shard_epoch or 0
+            if incoming_epoch >= shard_epoch:
+                shard_epoch = incoming_epoch
+                for sid, placement in sync_data.shard_map.items():
+                    shard_map[sid] = placement
+                
+                # PHASE 6: Backups persisten shards recibidos del primario
+                if server_role != "primary":
+                    try:
+                        for sid, placement in sync_data.shard_map.items():
+                            db_crud.upsert_shard(
+                                shard_id=sid,
+                                primary_id=placement.get("primary"),
+                                replica_ids=placement.get("replicas", []),
+                                epoch=placement.get("epoch", incoming_epoch),
+                            )
+                        db_crud.set_sync_metadata(key=SHARD_EPOCH_META_KEY, value=str(shard_epoch))
+                        logger.debug(
+                            f"[{server_id}] Backup: shards persistidos en DB (epoch={shard_epoch})"
+                        )
+                    except Exception as exc:
+                        logger.warning(f"[{server_id}] Backup: error persistiendo shards: {exc}")
+                
+                logger.debug(
+                    f"[{server_id}] Sync: shard_map actualizado (epoch={shard_epoch}, shards={len(shard_map)})"
+                )
+            else:
+                # PHASE 7: Responder HTTP 409 cuando epoch es menor
+                logger.warning(
+                    f"[{server_id}] Sync REJECTED: incoming epoch {incoming_epoch} < local epoch {shard_epoch}"
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "stale_epoch",
+                        "message": "Incoming shard_map epoch is older than local epoch",
+                        "incoming_epoch": incoming_epoch,
+                        "local_epoch": shard_epoch,
+                    }
+                )
     
     sync_status["last_sync"] = datetime.now().isoformat()
     sync_status["sync_count"] += 1
     
-    logger.info(f"[{server_id}] Sync completada. Cache: {len(dns_cache)}, API servers: {len(api_servers)}, Processors: {len(processor_servers)}")
+    logger.info(
+        f"[{server_id}] Sync completada. Cache: {len(dns_cache)}, API servers: {len(api_servers)}, Processors: {len(processor_servers)}, Shards: {len(shard_map)}"
+    )
     
     # VERIFICACIÓN SPLIT-BRAIN: Después de recibir sync, verificar consistencia
     background_tasks.add_task(resolve_split_brain)
@@ -417,6 +550,7 @@ async def receive_sync(sync_data: SyncData, background_tasks: BackgroundTasks):
         "entries": len(dns_cache),
         "api_servers": len(api_servers),
         "processors": len(processor_servers),
+        "shards": len(shard_map),
         "receiver": server_id
     }
 
@@ -433,6 +567,8 @@ async def get_cache():
         "cache": dns_cache,
         "api_servers": api_copy,
         "processor_servers": proc_copy,
+        "shard_map": dict(shard_map),
+        "shard_epoch": shard_epoch,
         "timestamp": datetime.now().isoformat(),
         "server_id": server_id,
         "role": server_role
@@ -547,6 +683,7 @@ async def register_api_server(request: APIServerRegisterRequest, background_task
         server_info = {
             "ip": request.ip,
             "port": request.port,
+            "host_id": request.host_id or "unknown",
             "role": assigned_role,
             "last_heartbeat": now,
             "registered_at": original_registered_at,  # Preservar timestamp original
@@ -571,7 +708,8 @@ async def register_api_server(request: APIServerRegisterRequest, background_task
                 "server_id": current_primary,
                 "ip": p["ip"],
                 "port": p["port"],
-                "url": f"http://{p['ip']}:{p['port']}"
+                "url": f"http://{p['ip']}:{p['port']}",
+                "host_id": p.get("host_id")
             }
         
         # Incluir epoch y lease en la respuesta para PRIMARY
@@ -639,6 +777,8 @@ async def api_server_heartbeat(request: APIServerHeartbeatRequest, background_ta
         
         # Actualizar heartbeat del servidor que envía
         api_servers[request.server_id]["last_heartbeat"] = now_iso
+        if request.host_id:
+            api_servers[request.server_id]["host_id"] = request.host_id
         
         assigned_role = api_servers[request.server_id]["role"]
         
@@ -881,6 +1021,7 @@ async def list_api_servers():
                 "server_id": sid,
                 "ip": info["ip"],
                 "port": info["port"],
+                "host_id": info.get("host_id"),
                 "role": info["role"],
                 "last_heartbeat": info["last_heartbeat"],
                 "registered_at": info["registered_at"],
@@ -1068,6 +1209,107 @@ async def list_processors():
             "active": sum(1 for p in processors if p["alive"]),
             "timestamp": now.isoformat()
         }
+
+
+# ============================================================================
+# ENDPOINTS PARA SHARDS
+# ============================================================================
+
+@app.get("/shard/list", response_model=ShardListResponse)
+async def list_shards():
+    async with shard_lock:
+        return ShardListResponse(epoch=shard_epoch, shards=dict(shard_map))
+
+
+@app.get("/shard/audit", response_model=ShardAuditResponse)
+async def audit_shards():
+    """Compara placement en memoria vs DB para detectar divergencias."""
+    db_shards = {s["shard_id"]: s for s in db_crud.list_shards()}
+
+    async with shard_lock:
+        mem_shards = {sid: dict(info) for sid, info in shard_map.items()}
+        mem_epoch = shard_epoch
+
+    divergences: List[ShardAuditEntry] = []
+    all_ids = set(db_shards.keys()) | set(mem_shards.keys())
+
+    for sid in sorted(all_ids):
+        mem = mem_shards.get(sid)
+        db_entry = db_shards.get(sid)
+        issues: List[str] = []
+
+        if not mem:
+            issues.append("missing_in_memory")
+        if not db_entry:
+            issues.append("missing_in_db")
+
+        if mem and db_entry:
+            if mem.get("primary") != db_entry.get("primary_id"):
+                issues.append("primary_mismatch")
+            if set(mem.get("replicas", [])) != set(db_entry.get("replica_ids", [])):
+                issues.append("replicas_mismatch")
+            if mem.get("epoch") != db_entry.get("epoch"):
+                issues.append("epoch_mismatch")
+
+        if issues:
+            divergences.append(
+                ShardAuditEntry(
+                    shard_id=sid,
+                    memory=mem,
+                    db=db_entry,
+                    issues=issues,
+                )
+            )
+
+    return ShardAuditResponse(
+        memory_epoch=mem_epoch,
+        memory_count=len(mem_shards),
+        db_count=len(db_shards),
+        divergences=divergences,
+    )
+
+
+@app.get("/shard/resolve/{shard_id}", response_model=ShardResolveResponse)
+async def resolve_shard(shard_id: str):
+    placement = await ensure_shard_placement(shard_id)
+    if server_role == "primary":
+        asyncio.create_task(propagate_service_registration("shard", shard_id, placement))
+    return build_shard_response(shard_id, placement)
+
+
+@app.post("/shard/update", response_model=ShardResolveResponse)
+async def update_shard(request: ShardUpdateRequest, background_tasks: BackgroundTasks):
+    # PHASE 6: Solo DNS primario puede actualizar shards
+    if server_role != "primary":
+        logger.warning(
+            f"[{server_id}] Backup DNS rechazando /shard/update para {request.shard_id}: solo primario puede actualizar"
+        )
+        if current_primary_url:
+            raise HTTPException(
+                status_code=307,
+                detail=f"Redirigir a DNS primario: {current_primary_url}",
+                headers={"Location": f"{current_primary_url}/shard/update"},
+            )
+        raise HTTPException(
+            status_code=503,
+            detail="Solo DNS primario puede actualizar shard placement"
+        )
+    
+    placement = await ensure_shard_placement(
+        request.shard_id,
+        preferred_primary=request.preferred_primary,
+        preferred_replicas=request.preferred_replicas,
+        origin_node=request.origin_node,
+    )
+
+    background_tasks.add_task(
+        propagate_service_registration,
+        "shard",
+        request.shard_id,
+        placement,
+    )
+
+    return build_shard_response(request.shard_id, placement)
 
 
 @app.get("/cluster/health")
@@ -1868,13 +2110,18 @@ async def propagate_service_registration(service_type: str, service_id: str, ser
         "timestamp": datetime.now().isoformat(),
         "source_id": server_id,
         "api_servers": {},
-        "processor_servers": {}
+        "processor_servers": {},
+        "shard_map": None,
+        "shard_epoch": shard_epoch,
     }
     
     if service_type == "processor":
         sync_data["processor_servers"] = {service_id: service_info}
     elif service_type == "api_server":
         sync_data["api_servers"] = {service_id: service_info}
+    elif service_type == "shard":
+        sync_data["shard_map"] = {service_id: service_info}
+        sync_data["shard_epoch"] = service_info.get("epoch", shard_epoch)
     
     # Enviar a todos los otros DNS conocidos
     for sid, info in cluster_state.items():
@@ -1929,6 +2176,455 @@ async def propagate_to_backups(hostname: str, ip: str):
             logger.error(f"[{server_id}] Error propagando a {sid}: {e}")
 
 
+# ============================================================================
+# GESTIÓN DE SHARDS
+# ============================================================================
+
+async def get_alive_storage_nodes() -> Dict[str, dict]:
+    """Retorna storage nodes vivos según heartbeat."""
+    async with api_servers_lock:
+        now = datetime.now()
+        alive: Dict[str, dict] = {}
+        for sid, info in api_servers.items():
+            last_hb = datetime.fromisoformat(info.get("last_heartbeat", now.isoformat()))
+            if (now - last_hb).total_seconds() < API_SERVER_TIMEOUT:
+                alive[sid] = info
+        return alive
+
+
+async def _trigger_shard_replication(shard_id: str, source_node_id: str, target_node_ids: List[str]):
+    """
+    Trigger shard replication from source to target nodes asynchronously.
+    
+    Args:
+        shard_id: Shard to replicate
+        source_node_id: Source node (usually the new primary)
+        target_node_ids: List of nodes that need to sync this shard
+    """
+    def _storage_url(sid: str) -> Optional[str]:
+        info = api_servers.get(sid)
+        if not info:
+            return None
+        ip = info.get("ip")
+        port = info.get("port")
+        if not ip or not port:
+            return None
+        return f"http://{ip}:{port}"
+    
+    source_url = _storage_url(source_node_id)
+    if not source_url:
+        logger.warning(f"[{server_id}] Cannot replicate shard {shard_id}: source node {source_node_id} URL not available")
+        return
+    
+    # Trigger replication on each target node (excluding source)
+    for target_id in target_node_ids:
+        if target_id == source_node_id:
+            continue
+        
+        target_url = _storage_url(target_id)
+        if not target_url:
+            continue
+        
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(
+                    f"{target_url}/internal/replicate-shard",
+                    params={
+                        "shard_id": shard_id,
+                        "source_node_url": source_url,
+                    },
+                )
+                
+                if resp.status_code == 200:
+                    logger.info(f"[{server_id}] Triggered shard {shard_id} replication on {target_id}")
+                else:
+                    logger.warning(f"[{server_id}] Failed to trigger replication on {target_id}: {resp.status_code}")
+        except Exception as exc:
+            logger.warning(f"[{server_id}] Error triggering replication on {target_id}: {exc}")
+
+
+def _host_of(info: dict) -> str:
+    return (info or {}).get("host_id") or "unknown"
+
+
+async def ensure_shard_placement(
+    shard_id: str,
+    preferred_primary: Optional[str] = None,
+    preferred_replicas: Optional[List[str]] = None,
+    replicas_required: int = 3,
+    origin_node: Optional[str] = None,  # Nodo que originó la escritura
+) -> dict:
+    """Asegura placement estable. Solo cambia cuando el cluster cambia y mantiene epoch bajo shard_lock.
+    
+    Si se proporciona origin_node y no existe placement, se prioriza ese nodo como primary.
+    
+    CONSENSUS RULE: Solo el DNS primario puede modificar shard_map.
+    Los backups devuelven el estado actual sin modificarlo.
+    """
+
+    async with shard_lock:
+        global shard_epoch
+        alive_nodes = await get_alive_storage_nodes()
+        existing = shard_map.get(shard_id)
+        
+        # PHASE 6: Backups solo leen, no escriben
+        if server_role != "primary":
+            if existing:
+                logger.debug(
+                    f"[{server_id}] Backup DNS: devolviendo shard {shard_id} sin modificar (epoch={existing.get('epoch')})"
+                )
+                return existing
+            else:
+                # Si no existe placement y somos backup, devolver error o redirigir a primario
+                if current_primary_url:
+                    logger.warning(
+                        f"[{server_id}] Backup DNS: shard {shard_id} no existe localmente, debería consultar primario"
+                    )
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Shard {shard_id} no encontrado en backup DNS. Consulte DNS primario."
+                )
+        
+        # ADAPTIVE FIX: Ajustar replicas_required al número de nodos disponibles
+        actual_replicas_required = min(replicas_required, len(alive_nodes))
+        if actual_replicas_required < replicas_required:
+            logger.info(
+                f"[{server_id}] Shard {shard_id}: ajustando replicas_required de {replicas_required} a {actual_replicas_required} "
+                f"(solo {len(alive_nodes)} nodos disponibles)"
+            )
+
+        def _storage_url(sid: Optional[str]) -> Optional[str]:
+            if not sid:
+                return None
+            info = api_servers.get(sid) or alive_nodes.get(sid)
+            ip = (info or {}).get("ip")
+            port = (info or {}).get("port")
+            if not ip or not port:
+                return None
+            return f"http://{ip}:{port}"
+
+        async def _request_full_sync(target_id: str, source_id: str) -> bool:
+            target_url = _storage_url(target_id)
+            source_url = _storage_url(source_id)
+            if not target_url or not source_url:
+                logger.warning(
+                    f"[{server_id}] full_sync omitido: target_url={target_url} source_url={source_url}"
+                )
+                return False
+
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(
+                        f"{target_url}/internal/full-sync",
+                        params={"primary_url": source_url},
+                    )
+                    if resp.status_code == 200:
+                        logger.info(
+                            f"[{server_id}] full_sync exitoso en {target_id} desde {source_id} para shard {shard_id}"
+                        )
+                        return True
+
+                    logger.warning(
+                        f"[{server_id}] full_sync falló ({resp.status_code}) en {target_id} desde {source_id}: {resp.text}"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    f"[{server_id}] full_sync error en {target_id} desde {source_id}: {exc}"
+                )
+            return False
+
+        if not alive_nodes:
+            if existing:
+                logger.warning(
+                    f"[{server_id}] No hay storage nodes vivos; se mantiene placement persistido para shard {shard_id}"
+                )
+                return existing
+            raise HTTPException(status_code=503, detail="No hay storage nodes disponibles para shards")
+
+        # ------------------------------------------------------------------
+        # Caso 1: ya existe placement -> mantenerlo salvo que el primary caiga
+        # ------------------------------------------------------------------
+        if existing:
+            replicas = list(existing.get("replicas", []))
+            primary = existing.get("primary")
+
+            if primary and primary not in replicas:
+                replicas = [primary] + replicas
+
+            alive_replicas = [r for r in replicas if r in alive_nodes]
+
+            # ADAPTIVE FIX: Usar el replicas_required ajustado
+            if len(alive_replicas) < actual_replicas_required:
+                logger.warning(
+                    f"[{server_id}] Shard {shard_id} degradado: {len(alive_replicas)}/{actual_replicas_required} replicas vivas. Se mantiene placement sin reasignar."
+                )
+
+            if not alive_replicas:
+                # Ninguna réplica viva; mantener placement persistido y salir
+                return existing
+
+            # Promover un nuevo primary solo entre réplicas que ya tenían los datos
+            new_primary = primary
+            if primary not in alive_nodes:
+                if preferred_primary and preferred_primary in alive_replicas:
+                    new_primary = preferred_primary
+                else:
+                    new_primary = alive_replicas[0]
+
+            changed = new_primary != primary
+            pending_sync = False
+            old_primary_for_sync = None
+
+            if changed:
+                # FAILOVER FIX: No bloquear promoción si primary está caído
+                # Promover inmediatamente y marcar como pending_sync
+                if primary in alive_nodes:
+                    # Primary vivo: intentar sync antes de promover (caso ideal)
+                    sync_ok = await _request_full_sync(target_id=new_primary, source_id=primary)
+                    if not sync_ok:
+                        logger.warning(
+                            f"[{server_id}] full_sync falló de {primary} a {new_primary}, pero promoviendo de todos modos (pending_sync=true)"
+                        )
+                        pending_sync = True
+                        old_primary_for_sync = primary
+                else:
+                    # Primary caído: promover inmediatamente y marcar para sync posterior
+                    logger.warning(
+                        f"[{server_id}] Primary {primary} caído. Promoviendo {new_primary} inmediatamente (pending_sync=true)"
+                    )
+                    pending_sync = True
+                    old_primary_for_sync = primary
+
+            new_placement = {
+                "primary": new_primary,
+                "replicas": replicas,
+                "epoch": existing.get("epoch", shard_epoch),
+                "updated_at": existing.get("updated_at"),
+                "pending_sync": pending_sync,
+                "old_primary": old_primary_for_sync,
+            }
+
+            if changed:
+                shard_epoch += 1
+                new_placement["epoch"] = shard_epoch
+                new_placement["updated_at"] = datetime.now().isoformat()
+                shard_map[shard_id] = new_placement
+                logger.info(
+                    f"[{server_id}] Shard {shard_id} primary actualizado -> {new_primary} (replicas={replicas}) epoch={shard_epoch}"
+                )
+
+                try:
+                    db_crud.upsert_shard(
+                        shard_id=shard_id,
+                        primary_id=new_placement["primary"],
+                        replica_ids=new_placement["replicas"],
+                        epoch=new_placement["epoch"],
+                    )
+                    db_crud.set_sync_metadata(key=SHARD_EPOCH_META_KEY, value=str(shard_epoch))
+                except Exception as exc:
+                    logger.warning(f"[{server_id}] No se pudo persistir shard {shard_id}: {exc}")
+                
+                # SHARD REPLICATION: Trigger replication to new replicas
+                asyncio.create_task(_trigger_shard_replication(shard_id, new_primary, alive_replicas))
+                
+                # PHASE 6: Propagar cambio inmediatamente a backups DNS
+                asyncio.create_task(
+                    propagate_service_registration("shard", shard_id, new_placement)
+                )
+            else:
+                shard_map[shard_id] = new_placement
+
+            return shard_map[shard_id]
+
+        # ------------------------------------------------------------------
+        # Caso 2: no existe placement -> crear uno nuevo (diversidad de host)
+        # Priorizar origin_node si está disponible
+        # ------------------------------------------------------------------
+        sorted_ids = sorted(alive_nodes.keys())
+        selected_primary: Optional[str] = None
+        selected_replicas: List[str] = []
+        used_hosts: Set[str] = set()
+
+        def add_replica(sid: str):
+            if sid in alive_nodes and sid not in selected_replicas:
+                selected_replicas.append(sid)
+                used_hosts.add(_host_of(alive_nodes[sid]))
+
+        # ORIGIN ALIGNMENT: Priorizar origin_node, luego preferred_primary
+        for candidate in (origin_node, preferred_primary):
+            if candidate and candidate in alive_nodes:
+                selected_primary = candidate
+                add_replica(candidate)
+                logger.info(
+                    f"[{server_id}] Shard {shard_id}: usando {candidate} como primary "
+                    f"({'origin_node' if candidate == origin_node else 'preferred_primary'})"
+                )
+                break
+
+        if not selected_primary:
+            for sid in sorted_ids:
+                selected_primary = sid
+                add_replica(sid)
+                break
+
+        candidate_replicas: List[str] = []
+        if preferred_replicas:
+            candidate_replicas.extend(preferred_replicas)
+
+        for sid in candidate_replicas:
+            if len(selected_replicas) >= actual_replicas_required:
+                break
+            if sid == selected_primary or sid not in alive_nodes:
+                continue
+            if _host_of(alive_nodes[sid]) in used_hosts:
+                continue
+            add_replica(sid)
+
+        for sid in sorted_ids:
+            if len(selected_replicas) >= actual_replicas_required:
+                break
+            if sid == selected_primary or sid in selected_replicas:
+                continue
+            if _host_of(alive_nodes[sid]) in used_hosts:
+                continue
+            add_replica(sid)
+
+        if len(selected_replicas) < actual_replicas_required:
+            for sid in sorted_ids:
+                if len(selected_replicas) >= actual_replicas_required:
+                    break
+                if sid == selected_primary or sid in selected_replicas:
+                    continue
+                add_replica(sid)
+
+        if not selected_replicas:
+            raise HTTPException(status_code=503, detail="No se pudo asignar replicas para el shard")
+
+        if len(selected_replicas) < actual_replicas_required:
+            logger.info(
+                f"[{server_id}] Shard {shard_id} creado con {len(selected_replicas)} replicas "
+                f"(ajustado de objetivo {replicas_required} a {actual_replicas_required} nodos disponibles)"
+            )
+
+        new_placement = {
+            "primary": selected_primary,
+            "replicas": selected_replicas,
+        }
+
+        shard_epoch += 1
+        new_placement["epoch"] = shard_epoch
+        new_placement["updated_at"] = datetime.now().isoformat()
+        shard_map[shard_id] = new_placement
+        logger.info(
+            f"[{server_id}] Shard {shard_id} placement creado -> primary={new_placement['primary']} replicas={new_placement['replicas']} epoch={shard_epoch}"
+        )
+
+        try:
+            db_crud.upsert_shard(
+                shard_id=shard_id,
+                primary_id=new_placement["primary"],
+                replica_ids=new_placement["replicas"],
+                epoch=new_placement["epoch"],
+            )
+            db_crud.set_sync_metadata(key=SHARD_EPOCH_META_KEY, value=str(shard_epoch))
+        except Exception as exc:
+            logger.warning(f"[{server_id}] No se pudo persistir shard {shard_id}: {exc}")
+
+        # Trigger replication for new placement
+        asyncio.create_task(_trigger_shard_replication(shard_id, selected_primary, selected_replicas))
+        
+        # PHASE 6: Propagar nuevo placement a backups DNS
+        asyncio.create_task(
+            propagate_service_registration("shard", shard_id, new_placement)
+        )
+
+        return new_placement
+
+
+async def rebalance_shards_for_dead_nodes(dead_ids: List[str]):
+    """Reasigna shards si alguna replica murió."""
+    if not dead_ids:
+        return
+
+    affected_shards: List[str] = []
+    async with shard_lock:
+        for sid, placement in shard_map.items():
+            replicas = placement.get("replicas", [])
+            if placement.get("primary") in dead_ids or any(r in dead_ids for r in replicas):
+                affected_shards.append(sid)
+
+    for shard_id in affected_shards:
+        try:
+            placement = await ensure_shard_placement(shard_id)
+            asyncio.create_task(
+                propagate_service_registration("shard", shard_id, placement)
+            )
+        except HTTPException as exc:
+            logger.warning(f"[{server_id}] No se pudo reequilibrar shard {shard_id}: {exc.detail}")
+
+
+def build_shard_response(shard_id: str, placement: dict) -> ShardResolveResponse:
+    """Construye respuesta de shard con URLs de storage nodes vivos.
+    
+    PHASE 6: Incluye validación de epoch para backups DNS.
+    Los backups advierten si su epoch es desactualizado.
+    """
+    nodes: Dict[str, dict] = {}
+    replica_urls: List[str] = []
+    primary_url: Optional[str] = None
+
+    # PHASE 6: Epoch fencing - los backups validan su epoch vs persistido
+    placement_epoch = placement.get("epoch", 0)
+    if server_role != "primary":
+        # Verificar si el epoch en memoria está desactualizado
+        try:
+            persisted_epoch_str = db_crud.get_sync_metadata(SHARD_EPOCH_META_KEY)
+            persisted_epoch = int(persisted_epoch_str) if persisted_epoch_str else 0
+            
+            if placement_epoch < persisted_epoch:
+                logger.warning(
+                    f"[{server_id}] STALE EPOCH: Shard {shard_id} en memoria tiene epoch={placement_epoch} "
+                    f"pero DB tiene epoch={persisted_epoch}. Datos potencialmente desactualizados."
+                )
+        except Exception as exc:
+            logger.debug(f"[{server_id}] No se pudo validar epoch de {shard_id}: {exc}")
+
+    # Snapshot de api_servers para mapear ids -> url
+    api_copy: Dict[str, dict] = dict(api_servers)
+
+    for sid, info in api_copy.items():
+        url = f"http://{info.get('ip')}:{info.get('port')}" if info.get('ip') and info.get('port') else None
+        nodes[sid] = {
+            "url": url,
+            "ip": info.get("ip"),
+            "port": info.get("port"),
+            "host_id": info.get("host_id"),
+            "role": info.get("role"),
+        }
+
+    for sid in placement.get("replicas", []):
+        url = nodes.get(sid, {}).get("url")
+        replica_urls.append(url)
+        if sid == placement.get("primary"):
+            primary_url = url
+    
+    # Determinar sync_status
+    pending_sync = placement.get("pending_sync", False)
+    sync_status = "pending" if pending_sync else "synced"
+
+    return ShardResolveResponse(
+        shard_id=shard_id,
+        primary=placement.get("primary"),
+        primary_url=primary_url,
+        replicas=placement.get("replicas", []),
+        replica_urls=replica_urls,
+        epoch=placement.get("epoch", shard_epoch),
+        nodes=nodes,
+        pending_sync=pending_sync,
+        sync_status=sync_status,
+    )
+
+
 async def cleanup_dead_api_servers():
     """Elimina servidores API (storage nodes) que han excedido el timeout"""
     async with api_servers_lock:
@@ -1964,6 +2660,9 @@ async def cleanup_dead_api_servers():
                 f"[{server_id}] Limpieza completada: {len(servers_to_remove)} storage node(s) eliminado(s). "
                 f"Nodos activos: {list(api_servers.keys())}"
             )
+
+    if servers_to_remove:
+        await rebalance_shards_for_dead_nodes(servers_to_remove)
 
 
 async def cleanup_dead_processor_servers():
@@ -2043,11 +2742,30 @@ async def sync_from_primary():
                             incoming_hb = info.get("last_heartbeat", "")
                             if incoming_hb > existing_hb:
                                 processor_servers[pid] = info
+
+                # Sincronizar shard_map
+                if "shard_map" in data:
+                    global shard_epoch
+                    async with shard_lock:
+                        incoming_epoch = data.get("shard_epoch") or 0
+                        if incoming_epoch >= shard_epoch:
+                            shard_map.clear()
+                            shard_map.update(data.get("shard_map", {}))
+                            shard_epoch = incoming_epoch
+                            logger.info(
+                                f"[{server_id}] shard_map sincronizado desde primario (epoch={shard_epoch}, shards={len(shard_map)})"
+                            )
+                        else:
+                            logger.debug(
+                                f"[{server_id}] shard_map remoto ignorado por epoch menor (incoming={incoming_epoch}, local={shard_epoch})"
+                            )
                 
                 sync_status["last_sync"] = datetime.now().isoformat()
                 sync_status["sync_count"] += 1
                 
-                logger.info(f"[{server_id}] Sincronización completada. Cache: {len(dns_cache)}, API servers: {len(api_servers)}, Processors: {len(processor_servers)}")
+                logger.info(
+                    f"[{server_id}] Sincronización completada. Cache: {len(dns_cache)}, API servers: {len(api_servers)}, Processors: {len(processor_servers)}, Shards: {len(shard_map)}"
+                )
     except Exception as e:
         logger.error(f"[{server_id}] Error en sincronización: {e}")
 
@@ -2162,6 +2880,83 @@ async def split_brain_monitor_loop():
             logger.error(f"[{server_id}] Error en split-brain monitor loop: {e}")
 
 
+async def pending_sync_retry_loop():
+    """
+    Loop que intenta completar sincronizaciones pendientes de shards con pending_sync=true.
+    Ejecuta cada SYNC_INTERVAL segundos, reintentando full_sync cuando ambos nodos (old y new primary) están vivos.
+    """
+    logger.info(f"[{server_id}] Iniciando pending_sync retry loop (intervalo: {SYNC_INTERVAL}s)")
+    
+    while True:
+        try:
+            await asyncio.sleep(SYNC_INTERVAL)
+            
+            # Solo ejecutar si soy el primario DNS
+            if server_role != "primary":
+                continue
+            
+            # Revisar shard_map en busca de shards con pending_sync=true
+            pending_shards = []
+            for shard_id, placement in shard_map.items():
+                if placement.get("pending_sync") and placement.get("old_primary"):
+                    pending_shards.append((shard_id, placement))
+            
+            if not pending_shards:
+                continue
+            
+            logger.info(f"[{server_id}] Reintentando sync para {len(pending_shards)} shards pendientes")
+            
+            for shard_id, placement in pending_shards:
+                new_primary = placement.get("primary")
+                old_primary = placement.get("old_primary")
+                
+                # Verificar si ambos nodos están vivos
+                if old_primary not in api_servers or new_primary not in api_servers:
+                    logger.debug(
+                        f"[{server_id}] Shard {shard_id}: old_primary={old_primary} o new_primary={new_primary} no disponible todavía"
+                    )
+                    continue
+                
+                # Construir URLs
+                new_primary_url = f"http://{api_servers[new_primary].get('ip')}:{api_servers[new_primary].get('port')}"
+                old_primary_url = f"http://{api_servers[old_primary].get('ip')}:{api_servers[old_primary].get('port')}"
+                
+                if not new_primary_url or not old_primary_url:
+                    continue
+                
+                # Intentar full_sync
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        resp = await client.post(
+                            f"{new_primary_url}/internal/full-sync",
+                            params={"primary_url": old_primary_url},
+                        )
+                        
+                        if resp.status_code == 200:
+                            logger.info(
+                                f"[{server_id}] ✓ Sync completado para shard {shard_id}: {old_primary} → {new_primary}"
+                            )
+                            # Limpiar flags de pending_sync
+                            placement["pending_sync"] = False
+                            placement["old_primary"] = None
+                            
+                            # Persistir cambio
+                            db_crud.update_shard_placement(shard_id, placement)
+                            
+                        else:
+                            logger.warning(
+                                f"[{server_id}] Sync falló ({resp.status_code}) para shard {shard_id}: {resp.text}"
+                            )
+                            
+                except Exception as exc:
+                    logger.warning(
+                        f"[{server_id}] Error al reintentar sync para shard {shard_id}: {exc}"
+                    )
+                    
+        except Exception as e:
+            logger.error(f"[{server_id}] Error en pending_sync retry loop: {e}")
+
+
 # ============================================================================
 # STARTUP
 # ============================================================================
@@ -2204,6 +2999,9 @@ async def startup_event():
     
     # Descubrir otros servidores
     await discover_via_dns_alias()
+
+    # Cargar shards persistidos (mapa + epoch)
+    load_shard_state_from_db()
     
     # Determinar rol inicial
     await determine_role()
@@ -2218,6 +3016,7 @@ async def startup_event():
     asyncio.create_task(sync_loop())
     asyncio.create_task(dns_split_brain_monitor_loop())  # Monitor de split-brain para DNS
     asyncio.create_task(split_brain_monitor_loop())  # Monitor de split-brain para storage nodes
+    asyncio.create_task(pending_sync_retry_loop())  # Retry de sincronización para shards en pending_sync
     
     logger.info(f"[{server_id}] DNS Service HA iniciado. Rol: {server_role}")
 
