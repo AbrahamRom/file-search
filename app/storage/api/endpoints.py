@@ -238,10 +238,10 @@ def delete_file_endpoint(file_id: str):
 @app.get("/search", response_model=SearchResponse)
 def search_files_endpoint(
     request: Request,
-    query: str = Query(..., min_length=1),
+    query: str = Query(..., min_length=1, max_length=500),
     limit: int = Query(10, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-    shard_id: Optional[str] = Query(None),
+    offset: int = Query(0, ge=0, le=1000000),
+    shard_id: Optional[str] = Query(None, max_length=100),
 ):
     """
     Search files by name.
@@ -308,8 +308,8 @@ def download_file_endpoint(file_id: str, request: Request):
 async def upload_file_endpoint(
     request: Request,
     file: UploadFile = File(...),
-    folder: str = Form(None),
-    shard_id: str = Form(None),
+    folder: str = Form(None, max_length=200),
+    shard_id: str = Form(None, max_length=100),
 ):
     """
     Upload a file to this Storage Node.
@@ -343,8 +343,35 @@ async def upload_file_endpoint(
         )
     
     try:
-        # Read content first for hash calculation
-        content = await file.read()
+        # Validar longitud del nombre de archivo
+        if len(file.filename) > 255:
+            raise HTTPException(
+                status_code=400,
+                detail="Filename too long. Maximum: 255 characters"
+            )
+        
+        # Validar caracteres en folder para prevenir path traversal
+        if folder:
+            if ".." in folder or folder.startswith("/"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid folder path"
+                )
+        
+        # Leer contenido validando tamaño máximo (500 MB)
+        MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB
+        content = b""
+        total_size = 0
+        
+        while chunk := await file.read(8192):  # Leer en chunks de 8KB
+            total_size += len(chunk)
+            if total_size > MAX_FILE_SIZE:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File too large. Maximum size: {MAX_FILE_SIZE // (1024*1024)}MB"
+                )
+            content += chunk
+        
         content_hash = hashlib.sha256(content).hexdigest()
         
         # Create target directory
