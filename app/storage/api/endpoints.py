@@ -56,6 +56,7 @@ from ..db.db import init_db, DB_PATH
 from ..services.scanner import sync, FILES_ROOT, compute_file_id
 from ..services import file_handler
 from ..services.node_manager import get_node_manager
+from ..common.cors_config import get_cors_config
 
 logger = logging.getLogger(__name__)
 access_logger = logging.getLogger("storage.access")
@@ -70,16 +71,13 @@ app = FastAPI(
 )
 
 # ============================================================================
-# CORS CONFIGURATION
+# CORS CONFIGURATION - SEGURA Y CENTRALIZADA
 # ============================================================================
-# Permitir CORS para que el navegador pueda descargar archivos
+# Aplicar configuración CORS segura basada en ambiente
+cors_config = get_cors_config()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # En producción, especificar los orígenes permitidos
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["Content-Disposition"],  # Importante para descargas
+    **cors_config,  # ✅ Distribuye: allow_origins, allow_credentials, etc.
 )
 
 

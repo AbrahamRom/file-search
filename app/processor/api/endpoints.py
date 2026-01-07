@@ -52,6 +52,7 @@ from ..services.storage_client import (
     init_storage_client,
 )
 from ..services.circuit_breaker import get_circuit_breaker_registry
+from ..common.cors_config import get_cors_config
 
 # Importar DNSClientHA común
 import sys
@@ -395,17 +396,13 @@ app = FastAPI(
 )
 
 # ============================================================================
-# CORS CONFIGURATION
+# CORS CONFIGURATION - SEGURA Y CENTRALIZADA
 # ============================================================================
-# Permitir CORS para que el navegador pueda descargar archivos desde el cliente
-# cuando el cliente está en un puerto diferente (ej: Streamlit en 8501)
+# Aplicar configuración CORS segura basada en ambiente
+cors_config = get_cors_config()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # En producción, especificar los orígenes permitidos
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["Content-Disposition"],  # Importante para descargas
+    **cors_config,  # ✅ Distribuye: allow_origins, allow_credentials, etc.
 )
 
 
