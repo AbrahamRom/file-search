@@ -22,14 +22,20 @@ from datetime import datetime
 from typing import List, Optional
 from contextlib import asynccontextmanager
 import time
+import mimetypes
+import socket
+import httpx
 
 try:
     fastapi = importlib.import_module("fastapi")
     pydantic = importlib.import_module("pydantic")
     cors_middleware = importlib.import_module("fastapi.middleware.cors")
+    slowapi = importlib.import_module("slowapi")
+    slowapi_util = importlib.import_module("slowapi.util")
+    slowapi_errors = importlib.import_module("slowapi.errors")
 except ModuleNotFoundError as exc:
     raise SystemExit(
-        "Missing required dependencies. Install fastapi and pydantic."
+        "Missing required dependencies. Install fastapi, pydantic and slowapi."
     ) from exc
 
 FastAPI = fastapi.FastAPI
@@ -43,6 +49,9 @@ UploadFile = fastapi.UploadFile
 File = fastapi.File
 Form = fastapi.Form
 CORSMiddleware = cors_middleware.CORSMiddleware
+Limiter = slowapi.Limiter
+get_remote_address = slowapi_util.get_remote_address
+RateLimitExceeded = slowapi_errors.RateLimitExceeded
 
 from ..services.storage_client import (
     StorageClient,
@@ -396,6 +405,29 @@ app = FastAPI(
 )
 
 # ============================================================================
+# RATE LIMITING CONFIGURATION - PROTECCIÓN CONTRA DoS
+# ============================================================================
+# Crear limitador basado en IP del cliente
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+
+# Handler para errores de rate limit
+@app.exception_handler(RateLimitExceeded)
+async def ratelimit_handler(request: Request, exc: RateLimitExceeded):
+    """Handle rate limit exceeded errors."""
+    client_host = request.client.host if request.client else "-"
+    logger.warning(
+        "Rate limit exceeded for IP %s on endpoint %s",
+        client_host,
+        request.url.path,
+    )
+    return {
+        "detail": "Too many requests. Please try again later.",
+        "retry_after": exc.headers.get("retry-after", "60"),
+        "status": 429,
+    }
+
+# ============================================================================
 # CORS CONFIGURATION - SEGURA Y CENTRALIZADA
 # ============================================================================
 # Aplicar configuración CORS segura basada en ambiente
@@ -410,8 +442,9 @@ app.add_middleware(
 # HEALTH & STATUS ENDPOINTS
 # ============================================================================
 
+@limiter.limit("100/minute")
 @app.get("/health", response_model=HealthResponse)
-async def health():
+async def health(request: Request):
     """Health check endpoint."""
     global _dns_client
     
@@ -434,8 +467,9 @@ async def health():
     )
 
 
+@limiter.limit("50/minute")
 @app.get("/status", response_model=ProcessorStatus)
-async def get_status():
+async def get_status(request: Request):
     """Get detailed status of this Processor Node."""
     global _dns_client
     
@@ -469,6 +503,7 @@ async def get_status():
 # FILE OPERATIONS (forwarded to Storage Nodes)
 # ============================================================================
 
+@limiter.limit("30/minute")
 @app.get("/files", response_model=List[FileMetadata])
 async def list_files(request: Request):
     """
@@ -499,8 +534,9 @@ async def list_files(request: Request):
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@limiter.limit("50/minute")
 @app.get("/files/{file_id}", response_model=FileMetadata)
-async def get_file(file_id: str, request: Request):
+async def get_file(request: Request, file_id: str):
     """Get file metadata by ID."""
     client = await get_storage_client_instance()
     
@@ -518,8 +554,9 @@ async def get_file(file_id: str, request: Request):
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@limiter.limit("5/minute")
 @app.delete("/files/{file_id}")
-async def delete_file(file_id: str, request: Request):
+async def delete_file(request: Request, file_id: str):
     """Delete a file."""
     client = await get_storage_client_instance()
     
@@ -540,8 +577,9 @@ async def delete_file(file_id: str, request: Request):
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@limiter.limit("20/minute")
 @app.get("/files/{file_id}/download")
-async def download_file(file_id: str, request: Request):
+async def download_file(request: Request, file_id: str):
     """
     Download a file.
     
@@ -589,6 +627,7 @@ async def download_file(file_id: str, request: Request):
 # SEARCH ENDPOINT
 # ============================================================================
 
+@limiter.limit("30/minute")
 @app.get("/search", response_model=SearchResponse)
 async def search_files(
     request: Request,
@@ -634,6 +673,7 @@ async def search_files(
 # UPLOAD ENDPOINT
 # ============================================================================
 
+@limiter.limit("10/minute")
 @app.post("/upload", response_model=UploadResponse)
 async def upload_file(
     request: Request,
@@ -710,8 +750,9 @@ async def upload_file(
 # ADMIN ENDPOINTS
 # ============================================================================
 
+@limiter.limit("2/minute")
 @app.post("/admin/health-check")
-async def trigger_health_check():
+async def trigger_health_check(request: Request):
     """Trigger health check of Storage Node via DNS."""
     client = await get_storage_client_instance()
     results = await client.check_health()
@@ -723,8 +764,9 @@ async def trigger_health_check():
     }
 
 
+@limiter.limit("2/minute")
 @app.post("/admin/reset-circuit-breakers")
-async def reset_circuit_breakers():
+async def reset_circuit_breakers(request: Request):
     """Reset all circuit breakers."""
     registry = get_circuit_breaker_registry()
     await registry.reset_all()
@@ -735,8 +777,9 @@ async def reset_circuit_breakers():
     }
 
 
+@limiter.limit("2/minute")
 @app.post("/admin/invalidate-dns-cache")
-async def invalidate_dns_cache():
+async def invalidate_dns_cache(request: Request):
     """Manually invalidate DNS cache to force re-resolution."""
     global _dns_client
     
@@ -750,8 +793,9 @@ async def invalidate_dns_cache():
     return {"status": "no_client", "message": "DNS client not initialized"}
 
 
+@limiter.limit("50/minute")
 @app.get("/admin/dns-status")
-async def get_dns_status():
+async def get_dns_status(request: Request):
     """Get DNS client status and all registered Storage Nodes."""
     global _dns_client
     
@@ -777,8 +821,9 @@ async def get_dns_status():
         }
 
 
+@limiter.limit("50/minute")
 @app.get("/node/status")
-async def get_node_status():
+async def get_node_status(request: Request):
     """
     Endpoint for compatibility with existing client.
     Returns node status in the expected format.

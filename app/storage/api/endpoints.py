@@ -21,14 +21,19 @@ import hashlib
 from datetime import datetime, timezone
 from typing import List, Optional
 from pathlib import Path
+import socket
+import httpx
 
 try:
     fastapi = importlib.import_module("fastapi")
     pydantic = importlib.import_module("pydantic")
     cors_middleware = importlib.import_module("fastapi.middleware.cors")
+    slowapi = importlib.import_module("slowapi")
+    slowapi_util = importlib.import_module("slowapi.util")
+    slowapi_errors = importlib.import_module("slowapi.errors")
 except ModuleNotFoundError as exc:
     raise SystemExit(
-        "Missing required dependencies. Install fastapi and pydantic."
+        "Missing required dependencies. Install fastapi, pydantic and slowapi."
     ) from exc
 
 FastAPI = fastapi.FastAPI
@@ -43,6 +48,9 @@ UploadFile = fastapi.UploadFile
 File = fastapi.File
 Form = fastapi.Form
 CORSMiddleware = cors_middleware.CORSMiddleware
+Limiter = slowapi.Limiter
+get_remote_address = slowapi_util.get_remote_address
+RateLimitExceeded = slowapi_errors.RateLimitExceeded
 
 from ..db.crud import (
     delete_file,
@@ -69,6 +77,29 @@ app = FastAPI(
     version="1.0.0",
     description="Internal API for Storage Node operations",
 )
+
+# ============================================================================
+# RATE LIMITING CONFIGURATION - PROTECCIÓN CONTRA DoS
+# ============================================================================
+# Crear limitador basado en IP del cliente
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+
+# Handler para errores de rate limit
+@app.exception_handler(RateLimitExceeded)
+async def ratelimit_handler(request: Request, exc: RateLimitExceeded):
+    """Handle rate limit exceeded errors."""
+    client_host = request.client.host if request.client else "-"
+    logger.warning(
+        "Rate limit exceeded for IP %s on endpoint %s",
+        client_host,
+        request.url.path,
+    )
+    return {
+        "detail": "Too many requests. Please try again later.",
+        "retry_after": exc.headers.get("retry-after", "60"),
+        "status": 429,
+    }
 
 # ============================================================================
 # CORS CONFIGURATION - SEGURA Y CENTRALIZADA
@@ -140,14 +171,16 @@ async def startup_event():
 # HEALTH & STATUS ENDPOINTS
 # ============================================================================
 
+@limiter.limit("100/minute")
 @app.get("/health")
-def health():
+def health(request: Request):
     """Health check endpoint."""
     return {"status": "ok", "storage_id": STORAGE_ID}
 
 
+@limiter.limit("50/minute")
 @app.get("/status", response_model=StorageStatusResponse)
-def get_status():
+def get_status(request: Request):
     """Get detailed status of this Storage Node."""
     return StorageStatusResponse(
         storage_id=STORAGE_ID,
@@ -163,6 +196,7 @@ def get_status():
 # FILE METADATA ENDPOINTS (for Processor Nodes)
 # ============================================================================
 
+@limiter.limit("30/minute")
 @app.get("/files", response_model=List[FileMetadata])
 def list_files_endpoint(
     request: Request,
@@ -184,8 +218,9 @@ def list_files_endpoint(
     return [FileMetadata(**r) for r in results]
 
 
+@limiter.limit("50/minute")
 @app.get("/files/{file_id}", response_model=FileMetadata)
-def get_file_endpoint(file_id: str, request: Request):
+def get_file_endpoint(request: Request, file_id: str):
     """Get metadata for a specific file."""
     record = get_file(file_id)
     if not record:
@@ -194,8 +229,9 @@ def get_file_endpoint(file_id: str, request: Request):
     return FileMetadata(**record)
 
 
+@limiter.limit("10/minute")
 @app.post("/files")
-def upsert_file_endpoint(payload: FileUpsertRequest):
+def upsert_file_endpoint(request: Request, payload: FileUpsertRequest):
     """Insert or update file metadata."""
     upsert_file(
         file_id=payload.file_id,
@@ -209,8 +245,9 @@ def upsert_file_endpoint(payload: FileUpsertRequest):
     return {"status": "upserted", "file_id": payload.file_id}
 
 
+@limiter.limit("5/minute")
 @app.delete("/files/{file_id}")
-def delete_file_endpoint(file_id: str):
+def delete_file_endpoint(request: Request, file_id: str):
     """Delete file metadata and optionally the physical file."""
     # Get file info before deleting
     record = get_file(file_id)
@@ -235,6 +272,7 @@ def delete_file_endpoint(file_id: str):
 # SEARCH ENDPOINT
 # ============================================================================
 
+@limiter.limit("30/minute")
 @app.get("/search", response_model=SearchResponse)
 def search_files_endpoint(
     request: Request,
@@ -275,8 +313,9 @@ def search_files_endpoint(
 # FILE DOWNLOAD ENDPOINT
 # ============================================================================
 
+@limiter.limit("20/minute")
 @app.get("/files/{file_id}/download")
-def download_file_endpoint(file_id: str, request: Request):
+def download_file_endpoint(request: Request, file_id: str):
     """Download a file by its ID."""
     try:
         target = file_handler.resolve_download(file_id)
@@ -304,6 +343,7 @@ def download_file_endpoint(file_id: str, request: Request):
 # FILE UPLOAD ENDPOINT
 # ============================================================================
 
+@limiter.limit("10/minute")
 @app.post("/upload")
 async def upload_file_endpoint(
     request: Request,
@@ -440,6 +480,7 @@ async def upload_file_endpoint(
 # SYNC ENDPOINTS (for Storage Node replication)
 # ============================================================================
 
+@limiter.limit("20/minute")
 @app.get("/internal/db_snapshot")
 def get_db_snapshot(request: Request, background_tasks: BackgroundTasks):
     """
@@ -486,6 +527,7 @@ def get_db_snapshot(request: Request, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail=f"Snapshot error: {str(e)}")
 
 
+@limiter.limit("20/minute")
 @app.get("/internal/files")
 def list_files_for_sync(request: Request):
     """
@@ -590,6 +632,7 @@ def list_files_for_sync(request: Request):
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
+@limiter.limit("20/minute")
 @app.get("/internal/files/metadata")
 def list_files_with_db_metadata(request: Request):
     """
@@ -736,6 +779,7 @@ def _resolve_safe_relative_path(relative_path: str) -> Path:
     return full_path
 
 
+@limiter.limit("50/minute")
 @app.post("/internal/replicate-file")
 async def replicate_file_from_peer(
     request: Request,
@@ -819,8 +863,9 @@ async def replicate_file_from_peer(
         raise HTTPException(status_code=500, detail=f"Replication error: {str(e)}")
 
 
+@limiter.limit("50/minute")
 @app.get("/internal/file/{file_path:path}")
-def get_file_for_sync(file_path: str, request: Request):
+def get_file_for_sync(request: Request, file_path: str):
     """
     Download a specific file for synchronization.
     The path is relative to the files root directory.
@@ -870,8 +915,9 @@ def get_file_for_sync(file_path: str, request: Request):
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
+@limiter.limit("2/minute")
 @app.post("/internal/resync")
-async def trigger_resync():
+async def trigger_resync(request: Request):
     """
     Trigger a resync of the file system with the database.
     Useful after manual file operations.
@@ -893,6 +939,7 @@ async def trigger_resync():
 # RECONCILIATION ENDPOINT
 # ============================================================================
 
+@limiter.limit("2/minute")
 @app.post("/internal/reconcile")
 async def reconcile_files(request: Request, background_tasks: BackgroundTasks):
     """
