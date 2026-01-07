@@ -680,17 +680,31 @@ def _parse_iso_datetime(value: str) -> datetime:
 
 
 def _resolve_safe_relative_path(relative_path: str) -> Path:
+    """
+    Resolve relative path safely, preventing path traversal attacks.
+    
+    SECURITY: Validates that the resolved path is within FILES_ROOT.
+    """
     if not relative_path:
         raise HTTPException(status_code=400, detail="relative_path is required")
 
     rel = Path(relative_path)
     if rel.is_absolute() or ".." in rel.parts:
+        logger.warning(
+            "[SECURITY] Invalid relative_path in replication: %s",
+            relative_path,
+        )
         raise HTTPException(status_code=400, detail="Invalid relative_path")
 
     full_path = (FILES_ROOT / rel).resolve()
     try:
         full_path.relative_to(FILES_ROOT.resolve())
     except ValueError:
+        logger.error(
+            "[SECURITY] Path traversal blocked in replication: relative_path=%s, resolved=%s",
+            relative_path,
+            full_path,
+        )
         raise HTTPException(status_code=403, detail="Access denied")
     return full_path
 
@@ -783,9 +797,20 @@ def get_file_for_sync(file_path: str, request: Request):
     """
     Download a specific file for synchronization.
     The path is relative to the files root directory.
+    
+    SECURITY: Validates path to prevent traversal attacks.
     """
     client_host = request.client.host if request.client else "-"
     logger.info("[SYNC] File %s requested from %s", file_path, client_host)
+    
+    # SECURITY: Validate against path traversal
+    if ".." in file_path or file_path.startswith("/"):
+        logger.warning(
+            "[SECURITY] Path traversal attempt in sync: file_path=%s, client=%s",
+            file_path,
+            client_host,
+        )
+        raise HTTPException(status_code=400, detail="Invalid file path")
     
     try:
         full_path = FILES_ROOT / file_path
