@@ -238,64 +238,92 @@ async def _discover_dns_url() -> Optional[str]:
 
 
 async def _register_with_dns():
-    """Register this processor with the DNS service."""
+    """Register this processor with ALL available DNS servers.
+    This ensures that all DNS servers know about this processor, even if they're on different hosts."""
     import httpx
     
-    # Reintentar registro con backoff exponencial
-    max_attempts = 5
-    for attempt in range(max_attempts):
-        dns_url = await _discover_dns_url()
-        if not dns_url:
-            if attempt < max_attempts - 1:
-                wait_time = min(2 ** attempt, 30)  # Backoff exponencial hasta 30s
-                logger.warning("Could not discover DNS server for registration (attempt %d/%d), retrying in %ds...", 
-                             attempt + 1, max_attempts, wait_time)
-                await asyncio.sleep(wait_time)
-                continue
-            else:
-                logger.error("Could not discover DNS server for registration after %d attempts", max_attempts)
-                return False
-        
-        my_ip = await _get_my_ip()
-        port = int(os.getenv("PROCESSOR_PORT", 8000))
-        external_port = int(PROCESSOR_EXTERNAL_PORT) if PROCESSOR_EXTERNAL_PORT else None
-        external_ip = PROCESSOR_EXTERNAL_IP  # IP del host físico (accesible desde navegador)
-        
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                payload = {
-                    "processor_id": PROCESSOR_ID,
-                    "ip": my_ip,
-                    "port": port
-                }
-                if external_port:
-                    payload["external_port"] = external_port
-                if external_ip:
-                    payload["external_ip"] = external_ip
-                    
-                response = await client.post(
-                    f"{dns_url}/processor/register",
-                    json=payload
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    logger.info("Registered with DNS: %s (total processors: %d)", 
-                               PROCESSOR_ID, data.get("total_processors", 0))
-                    return True
-                else:
-                    logger.error("DNS registration failed: %s", response.text)
-        except Exception as e:
-            logger.warning("Error registering with DNS (attempt %d/%d): %s", attempt + 1, max_attempts, e)
-            global _cached_dns_url, _cached_dns_ts
-            _cached_dns_url = None
-            _cached_dns_ts = 0.0
-            
-            if attempt < max_attempts - 1:
-                wait_time = min(2 ** attempt, 30)
-                await asyncio.sleep(wait_time)
-                continue
+    # Descubrir todas las IPs del DNS
+    max_attempts = 3
+    dns_ips = []
     
-    return False
+    for attempt in range(max_attempts):
+        try:
+            results = socket.getaddrinfo(DNS_ALIAS, DNS_PORT, socket.AF_INET, socket.SOCK_STREAM)
+            dns_ips = sorted(set(result[4][0] for result in results))
+            if dns_ips:
+                break
+        except Exception as e:
+            logger.warning("Error discovering DNS servers (attempt %d/%d): %s", attempt + 1, max_attempts, e)
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(2 ** attempt)
+    
+    if not dns_ips:
+        logger.error("Failed to discover any DNS servers after %d attempts", max_attempts)
+        return False
+    
+    logger.info("Discovered %d DNS server(s): %s", len(dns_ips), dns_ips)
+    
+    my_ip = await _get_my_ip()
+    port = int(os.getenv("PROCESSOR_PORT", 8000))
+    external_port = int(PROCESSOR_EXTERNAL_PORT) if PROCESSOR_EXTERNAL_PORT else None
+    external_ip = PROCESSOR_EXTERNAL_IP  # IP del host físico (accesible desde navegador)
+    
+    payload = {
+        "processor_id": PROCESSOR_ID,
+        "ip": my_ip,
+        "port": port
+    }
+    if external_port:
+        payload["external_port"] = external_port
+    if external_ip:
+        payload["external_ip"] = external_ip
+    
+    # Intentar registrarse con TODOS los DNS descubiertos
+    registered_count = 0
+    registration_errors = []
+    
+    for dns_ip in dns_ips:
+        dns_url = f"http://{dns_ip}:{DNS_PORT}"
+        
+        # Reintentar con cada DNS individual
+        max_retries = 3
+        for retry in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.post(
+                        f"{dns_url}/processor/register",
+                        json=payload
+                    )
+                    if response.status_code == 200:
+                        data = response.json()
+                        logger.info("Registered with DNS %s: %s (total processors: %d)", 
+                                   dns_ip, PROCESSOR_ID, data.get("total_processors", 0))
+                        registered_count += 1
+                        
+                        # Actualizar cache con este DNS exitoso
+                        global _cached_dns_url, _cached_dns_ts
+                        if not _cached_dns_url:
+                            _cached_dns_url = dns_url
+                            _cached_dns_ts = time.time()
+                        
+                        break  # Éxito con este DNS, pasar al siguiente
+                    else:
+                        logger.warning("DNS %s registration failed: %s", dns_ip, response.text)
+                        if retry < max_retries - 1:
+                            await asyncio.sleep(1 * (retry + 1))
+            except Exception as e:
+                logger.warning("Error registering with DNS %s (attempt %d/%d): %s", 
+                             dns_ip, retry + 1, max_retries, e)
+                registration_errors.append(f"{dns_ip}: {e}")
+                if retry < max_retries - 1:
+                    await asyncio.sleep(1 * (retry + 1))
+    
+    if registered_count > 0:
+        logger.info("Successfully registered with %d/%d DNS server(s)", registered_count, len(dns_ips))
+        return True
+    else:
+        logger.error("Failed to register with any DNS server. Errors: %s", registration_errors)
+        return False
 
 
 async def _send_heartbeat():

@@ -109,3 +109,18 @@ docker run -d \
   -e STORAGE_RETRY_DELAY=0.5 \
   -e LOG_DIR=/app/logs \
   file-search-processor:latest
+  
+  docker run -d \
+  --name client_2 \
+  --hostname client_2 \
+  --network file_search_net \
+  -p 8502:8501 \
+  -e DNS_ALIAS=dns \
+  -e DNS_SERVICE_PORT=5353 \
+  -e TARGET_SERVICE_NAME=processor \
+  -e TARGET_SERVICE_PORT=8000 \
+  -e API_BASE_URL=http://processor_2:8000 \
+  -e BROWSER_API_URL=http://192.168.100.63:8001 \
+  -e MAX_RETRIES=3 \
+  -e RETRY_DELAY=0.5 \
+  file-search-client:latest

@@ -2003,6 +2003,64 @@ async def cleanup_dead_processor_servers():
             )
 
 
+async def sync_from_all_backups():
+    """El PRIMARY sincroniza (merge) información de todos los BACKUP.
+    Esto permite que el PRIMARY descubra servicios (processors, storage) registrados en otros DNS."""
+    if server_role != "primary":
+        return
+    
+    synced_from = []
+    
+    for sid, info in cluster_state.items():
+        if sid == server_id or not info.get("healthy"):
+            continue
+        
+        url = info.get("url")
+        if not url:
+            continue
+        
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(f"{url}/cache")
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # Merge processor_servers
+                    async with processor_servers_lock:
+                        for pid, proc_info in data.get("processor_servers", {}).items():
+                            if pid not in processor_servers:
+                                processor_servers[pid] = proc_info
+                                logger.info(f"[{server_id}] Sincronizado processor {pid} desde {sid}")
+                            else:
+                                # Mantener el más reciente
+                                existing_hb = processor_servers[pid].get("last_heartbeat", "")
+                                incoming_hb = proc_info.get("last_heartbeat", "")
+                                if incoming_hb > existing_hb:
+                                    processor_servers[pid] = proc_info
+                                    logger.debug(f"[{server_id}] Actualizado processor {pid} desde {sid} (más reciente)")
+                    
+                    # Merge api_servers (storage nodes)
+                    async with api_servers_lock:
+                        for asid, api_info in data.get("api_servers", {}).items():
+                            if asid not in api_servers:
+                                api_servers[asid] = api_info
+                                logger.info(f"[{server_id}] Sincronizado storage node {asid} desde {sid}")
+                            else:
+                                # Mantener el más reciente
+                                existing_hb = api_servers[asid].get("last_heartbeat", "")
+                                incoming_hb = api_info.get("last_heartbeat", "")
+                                if incoming_hb > existing_hb:
+                                    api_servers[asid] = api_info
+                                    logger.debug(f"[{server_id}] Actualizado storage node {asid} desde {sid} (más reciente)")
+                    
+                    synced_from.append(sid)
+        except Exception as e:
+            logger.debug(f"[{server_id}] Error sincronizando desde {sid}: {e}")
+    
+    if synced_from:
+        logger.info(f"[{server_id}] PRIMARY: Sincronizado desde {len(synced_from)} BACKUP(s): {synced_from}")
+
+
 async def sync_from_primary():
     """Sincroniza el estado completo desde el primario (cache, api_servers, processor_servers)"""
     global current_primary_url
@@ -2097,16 +2155,23 @@ async def health_check_loop():
 
 
 async def sync_loop():
-    """Loop de sincronización periódica (solo backups)"""
+    """Loop de sincronización periódica (bidireccional)"""
     while True:
         try:
             await asyncio.sleep(SYNC_INTERVAL)
             
-            if server_role == "backup" and current_primary_url:
-                if not sync_status["is_syncing"]:
-                    sync_status["is_syncing"] = True
+            if not sync_status["is_syncing"]:
+                sync_status["is_syncing"] = True
+                
+                # BACKUP sincroniza desde PRIMARY
+                if server_role == "backup" and current_primary_url:
                     await sync_from_primary()
-                    sync_status["is_syncing"] = False
+                
+                # PRIMARY sincroniza desde todos los BACKUP (merge)
+                elif server_role == "primary":
+                    await sync_from_all_backups()
+                
+                sync_status["is_syncing"] = False
         except Exception as e:
             logger.error(f"[{server_id}] Error en sync loop: {e}")
             sync_status["is_syncing"] = False
