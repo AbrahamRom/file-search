@@ -115,10 +115,14 @@ class SyncService:
     
     async def sync_files(self) -> Dict[str, int]:
         """
-        Synchronize files from the PRIMARY.
-        Last-Modified-Wins (LWW):
-        - Si el PRIMARY tiene una versión más nueva, se descarga y se preserva mtime.
-        - Si el BACKUP tiene una versión más nueva, se empuja al PRIMARY (replicate-file).
+        Synchronize files from the PRIMARY with conflict preservation.
+        
+        Strategy:
+        1. Merge bidireccional: preservar archivos locales que no están en PRIMARY
+        2. Last-Modified-Wins (LWW) para archivos con mismo nombre:
+           - Versión más reciente gana
+           - Versión perdedora se preserva como .conflict si contenido difiere
+        3. Push local files that don't exist on PRIMARY (divergence after partition)
         """
         if not self._primary_url:
             logger.warning("[SyncService] No PRIMARY URL configured")
@@ -126,6 +130,7 @@ class SyncService:
         
         downloaded = 0
         pushed = 0
+        conflicts = 0
         errors = 0
 
         def _parse_remote_mtime(value: str) -> Optional[float]:
@@ -157,8 +162,55 @@ class SyncService:
                 remote_files = response.json().get("files", [])
                 logger.debug(f"[SyncService] Remote files: {len(remote_files)}")
                 
-                # Compare with local files
-                conflicted = 0
+                # Build index of remote files by relative_path for quick lookup
+                remote_files_index = {rf["relative_path"]: rf for rf in remote_files}
+                
+                # Build index of local files
+                local_files = []
+                if FILES_ROOT.exists():
+                    for file_path in FILES_ROOT.rglob("*"):
+                        if file_path.is_file():
+                            relative_path = file_path.relative_to(FILES_ROOT).as_posix()
+                            local_files.append({
+                                "relative_path": relative_path,
+                                "path": file_path,
+                                "stat": file_path.stat()
+                            })
+                
+                # PHASE 1: Push local files that don't exist on PRIMARY (divergence preservation)
+                for local_file in local_files:
+                    relative_path = local_file["relative_path"]
+                    if relative_path not in remote_files_index:
+                        # Este archivo existe localmente pero no en PRIMARY
+                        # Empujarlo para preservar divergencia
+                        try:
+                            local_path = local_file["path"]
+                            local_stat = local_file["stat"]
+                            payload_mtime = datetime.fromtimestamp(local_stat.st_mtime, tz=timezone.utc).isoformat()
+
+                            with open(local_path, "rb") as f:
+                                files_payload = {"file": (local_path.name, f, "application/octet-stream")}
+                                data = {
+                                    "relative_path": relative_path,
+                                    "last_modified": payload_mtime,
+                                }
+                                push_resp = await client.post(
+                                    f"{self._primary_url}/internal/replicate-file",
+                                    files=files_payload,
+                                    data=data,
+                                )
+
+                            if push_resp.status_code in (200, 201):
+                                pushed += 1
+                                logger.info(f"[SyncService] Pushed local-only file to PRIMARY: {relative_path}")
+                            else:
+                                errors += 1
+                                logger.warning(f"[SyncService] Error pushing {relative_path}: {push_resp.status_code}")
+                        except Exception as e:
+                            errors += 1
+                            logger.error(f"[SyncService] Error pushing local-only file {relative_path}: {e}")
+                
+                # PHASE 2: Process files that exist on PRIMARY (download or push based on LWW)
                 for remote_file in remote_files:
                     relative_path = remote_file["relative_path"]
                     remote_size = remote_file["size"]
@@ -176,44 +228,73 @@ class SyncService:
                         local_mtime = stat.st_mtime
                         local_size = stat.st_size
                         
-                        # Calculate local hash if remote has hash
+                        # Calculate local hash to detect content differences
                         local_hash = None
-                        if remote_hash and local_path.is_file():
+                        if local_path.is_file():
                             try:
                                 with open(local_path, "rb") as f:
                                     local_hash = hashlib.sha256(f.read()).hexdigest()
                             except Exception as e:
                                 logger.warning(f"[SyncService] Error calculating hash for {relative_path}: {e}")
 
-                        # Conflict detection: same mtime but different hash
-                        if (remote_hash and local_hash and 
-                            remote_hash != local_hash and 
-                            abs(remote_mtime - local_mtime) <= tolerance):
-                            # Conflict: preserve local as .conflict and download remote
-                            try:
-                                conflict_name = f"{local_path.stem}.conflict.{local_hash[:8]}{local_path.suffix}"
-                                conflict_path = local_path.parent / conflict_name
-                                shutil.copy2(local_path, conflict_path)
-                                logger.warning(
-                                    f"[CONFLICT] Detected divergent content for {relative_path}. "
-                                    f"Preserved local as {conflict_name}, will download PRIMARY version."
-                                )
-                                conflicted += 1
-                                action = "download"
-                            except Exception as e:
-                                logger.error(f"[CONFLICT] Error preserving conflict copy: {e}")
-                                action = "skip"
-                        elif remote_mtime is None:
+                        # Determine action based on LWW and content differences
+                        if remote_mtime is None:
                             # Fallback: comportamiento previo por tamaño
                             action = "download" if local_size != remote_size else "skip"
                         else:
+                            # LWW logic with conflict preservation
                             if remote_mtime > local_mtime + tolerance:
+                                # PRIMARY has newer version
+                                # Check if content differs - if so, preserve local before overwriting
+                                if remote_hash and local_hash and remote_hash != local_hash:
+                                    # Content differs - preserve local as conflict
+                                    try:
+                                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                        conflict_name = f"{local_path.stem}.conflict.{timestamp}.{local_hash[:8]}{local_path.suffix}"
+                                        conflict_path = local_path.parent / conflict_name
+                                        shutil.copy2(local_path, conflict_path)
+                                        conflicts += 1
+                                        logger.warning(
+                                            f"[CONFLICT] PRIMARY has newer version but different content for {relative_path}. "
+                                            f"Preserved local as {conflict_name}, will download PRIMARY version."
+                                        )
+                                    except Exception as e:
+                                        logger.error(f"[CONFLICT] Error preserving conflict copy: {e}")
                                 action = "download"
                             elif local_mtime > remote_mtime + tolerance:
-                                action = "push"
+                                # Local is newer - check if we should push it
+                                if remote_hash and local_hash and remote_hash != local_hash:
+                                    # Content differs and local is newer - push to PRIMARY
+                                    action = "push"
+                                else:
+                                    # Same content, skip
+                                    action = "skip"
                             else:
-                                # Tie-breaker para converger: preferir PRIMARY
-                                action = "download" if local_size != remote_size else "skip"
+                                # Timestamps are very close (within tolerance)
+                                # Check content to decide
+                                if remote_hash and local_hash:
+                                    if remote_hash != local_hash:
+                                        # Content differs with similar timestamps - this is a true conflict
+                                        # Preserve local and download PRIMARY (PRIMARY wins ties)
+                                        try:
+                                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                            conflict_name = f"{local_path.stem}.conflict.{timestamp}.{local_hash[:8]}{local_path.suffix}"
+                                            conflict_path = local_path.parent / conflict_name
+                                            shutil.copy2(local_path, conflict_path)
+                                            conflicts += 1
+                                            logger.warning(
+                                                f"[CONFLICT] Concurrent modification detected for {relative_path}. "
+                                                f"Preserved local as {conflict_name}, PRIMARY version wins."
+                                            )
+                                        except Exception as e:
+                                            logger.error(f"[CONFLICT] Error preserving conflict copy: {e}")
+                                        action = "download"
+                                    else:
+                                        # Same content, skip
+                                        action = "skip"
+                                else:
+                                    # No hash available, use size as fallback
+                                    action = "download" if local_size != remote_size else "skip"
 
                     if action == "download":
                         try:
@@ -278,8 +359,8 @@ class SyncService:
                             errors += 1
                             logger.error(f"[SyncService] Error pushing {relative_path}: {e}")
             
-            if downloaded > 0 or pushed > 0 or conflicted > 0:
-                logger.info(f"[SyncService] File sync completed: {downloaded} downloaded, {pushed} pushed, {conflicted} conflicts, {errors} errors")
+            if downloaded > 0 or pushed > 0 or conflicts > 0:
+                logger.info(f"[SyncService] File sync completed: {downloaded} downloaded, {pushed} pushed, {conflicts} conflicts, {errors} errors")
             
         except httpx.TimeoutException:
             logger.error("[SyncService] Timeout syncing files")
@@ -288,7 +369,7 @@ class SyncService:
             logger.error(f"[SyncService] Error syncing files: {e}")
             errors += 1
         
-        return {"downloaded": downloaded, "pushed": pushed, "conflicted": conflicted, "errors": errors}
+        return {"downloaded": downloaded, "pushed": pushed, "conflicts": conflicts, "errors": errors}
     
     async def reconcile_missing_files(self) -> Dict[str, int]:
         """
@@ -438,6 +519,7 @@ class SyncService:
             logger.info(
                 f"[SyncService] Sync #{self._sync_count} completed in {elapsed:.2f}s. "
                 f"DB: {'OK' if db_ok else 'FAIL'}, Files: {file_result['downloaded']} downloaded, "
+                f"{file_result['pushed']} pushed, {file_result['conflicts']} conflicts, "
                 f"Reconciled: {reconcile_result['downloaded']} recovered"
             )
             
