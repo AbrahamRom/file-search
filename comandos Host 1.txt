@@ -57,7 +57,7 @@ docker run -d \
   -e PROCESSOR_ID=processor_1 \
   -e PROCESSOR_PORT=8000 \
   -e PROCESSOR_EXTERNAL_PORT=8000 \
-  -e PROCESSOR_EXTERNAL_IP=192.168.163.211 \
+  -e PROCESSOR_EXTERNAL_IP=192.168.100.212 \
   -e STORAGE_NODES=http://storage_1:8000,http://storage_2:8000,http://storage_3:8000 \
   -e STORAGE_URL=http://storage_1:8000 \
   -e DNS_ALIAS=dns \
@@ -78,7 +78,7 @@ docker run -d \
   -e TARGET_SERVICE_NAME=processor \
   -e TARGET_SERVICE_PORT=8000 \
   -e API_BASE_URL=http://processor_1:8000 \
-  -e BROWSER_API_URL=http://192.168.163.212:8000 \
+  -e BROWSER_API_URL=http://192.168.100.212:8000 \
   -e MAX_RETRIES=3 \
   -e RETRY_DELAY=0.5 \
   file-search-client:latest

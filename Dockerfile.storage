@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.
 
 # Copy application code
 COPY app/__init__.py /app/__init__.py
+COPY app/common /app/common
 COPY app/storage /app/storage
 
 # Create internal directories (data and files live inside the container)

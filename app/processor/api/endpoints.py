@@ -61,12 +61,10 @@ from ..services.storage_client import (
     init_storage_client,
 )
 from ..services.circuit_breaker import get_circuit_breaker_registry
-from ..common.cors_config import get_cors_config
+from common.cors_config import get_cors_config
 
 # Importar DNSClientHA común
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
-from app.common.resolver import DNSClientHA
+from common.resolver import DNSClientHA
 
 logger = logging.getLogger(__name__)
 access_logger = logging.getLogger("processor.access")

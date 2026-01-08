@@ -99,7 +99,7 @@ docker run -d \
   -e PROCESSOR_ID=processor_2 \
   -e PROCESSOR_PORT=8000 \
   -e PROCESSOR_EXTERNAL_PORT=8001 \
-  -e PROCESSOR_EXTERNAL_IP=192.168.163.212 \
+  -e PROCESSOR_EXTERNAL_IP=192.168.100.63 \
   -e STORAGE_NODES=http://storage_1:8000,http://storage_2:8000,http://storage_3:8000 \
   -e STORAGE_URL=http://storage_1:8000 \
   -e DNS_ALIAS=dns \

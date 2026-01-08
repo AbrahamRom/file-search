@@ -64,7 +64,7 @@ from ..db.db import init_db, DB_PATH
 from ..services.scanner import sync, FILES_ROOT, compute_file_id
 from ..services import file_handler
 from ..services.node_manager import get_node_manager
-from ..common.cors_config import get_cors_config
+from common.cors_config import get_cors_config
 
 logger = logging.getLogger(__name__)
 access_logger = logging.getLogger("storage.access")
