@@ -54,15 +54,18 @@ class SyncService:
     
     async def sync_database(self) -> bool:
         """
-        Download the database snapshot from the PRIMARY.
-        Uses SQLite backup API for consistency.
+        Merge database from PRIMARY with local database using LWW strategy.
+        
+        Instead of replacing the entire database, we merge records:
+        - For each file, keep the version with the most recent last_modified
+        - This preserves local newer versions during split-brain recovery
         """
         if not self._primary_url:
             logger.warning("[SyncService] No PRIMARY URL configured")
             return False
         
         try:
-            logger.info(f"[SyncService] Syncing database from {self._primary_url}...")
+            logger.info(f"[SyncService] Merging database from {self._primary_url}...")
             
             async with httpx.AsyncClient(timeout=SYNC_TIMEOUT) as client:
                 response = await client.get(f"{self._primary_url}/internal/db_snapshot")
@@ -75,14 +78,15 @@ class SyncService:
                     
                     # Verify downloaded file integrity
                     try:
-                        conn = sqlite3.connect(tmp_path)
-                        cursor = conn.cursor()
+                        remote_conn = sqlite3.connect(tmp_path)
+                        remote_conn.row_factory = sqlite3.Row
+                        cursor = remote_conn.cursor()
                         cursor.execute("PRAGMA integrity_check")
                         result = cursor.fetchone()
-                        conn.close()
                         
                         if result[0] != "ok":
                             logger.error(f"[SyncService] Downloaded DB is corrupt: {result}")
+                            remote_conn.close()
                             os.unlink(tmp_path)
                             return False
                             
@@ -91,18 +95,96 @@ class SyncService:
                         os.unlink(tmp_path)
                         return False
                     
-                    # Replace local database
-                    db_path = str(DB_PATH)
-                    
-                    # Ensure directory exists
+                    # Ensure local DB exists
                     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
                     
-                    # Move temporary file to final location
-                    shutil.move(tmp_path, db_path)
+                    # Merge databases using LWW strategy
+                    merged_count = 0
+                    kept_local = 0
+                    new_from_remote = 0
                     
-                    size_kb = os.path.getsize(db_path) / 1024
-                    logger.info(f"[SyncService] Database synced ({size_kb:.2f} KB)")
-                    return True
+                    try:
+                        local_conn = sqlite3.connect(str(DB_PATH))
+                        local_conn.row_factory = sqlite3.Row
+                        
+                        # Get all remote files
+                        cursor.execute("""
+                            SELECT file_id, name, path, size, last_modified, shard_id, 
+                                   content_hash, version, origin_node, write_epoch 
+                            FROM files
+                        """)
+                        remote_files = {row["file_id"]: dict(row) for row in cursor.fetchall()}
+                        
+                        # Get all local files
+                        local_cursor = local_conn.cursor()
+                        local_cursor.execute("""
+                            SELECT file_id, name, path, size, last_modified, shard_id,
+                                   content_hash, version, origin_node, write_epoch 
+                            FROM files
+                        """)
+                        local_files = {row["file_id"]: dict(row) for row in local_cursor.fetchall()}
+                        
+                        # Merge: for each file, keep the one with newest last_modified
+                        all_file_ids = set(remote_files.keys()) | set(local_files.keys())
+                        
+                        for file_id in all_file_ids:
+                            remote_file = remote_files.get(file_id)
+                            local_file = local_files.get(file_id)
+                            
+                            if remote_file and not local_file:
+                                # Only exists on remote -> insert locally
+                                self._upsert_file_record(local_conn, remote_file)
+                                new_from_remote += 1
+                            elif local_file and not remote_file:
+                                # Only exists locally -> keep local (will be pushed in sync_files)
+                                kept_local += 1
+                            else:
+                                # Exists in both -> LWW comparison
+                                remote_mtime = self._parse_mtime(remote_file.get("last_modified"))
+                                local_mtime = self._parse_mtime(local_file.get("last_modified"))
+                                
+                                if remote_mtime is None or local_mtime is None:
+                                    # Fallback: use version number or write_epoch
+                                    remote_epoch = remote_file.get("write_epoch") or 0
+                                    local_epoch = local_file.get("write_epoch") or 0
+                                    remote_version = remote_file.get("version") or 0
+                                    local_version = local_file.get("version") or 0
+                                    
+                                    if remote_epoch > local_epoch or (remote_epoch == local_epoch and remote_version > local_version):
+                                        self._upsert_file_record(local_conn, remote_file)
+                                        merged_count += 1
+                                    else:
+                                        kept_local += 1
+                                elif remote_mtime > local_mtime:
+                                    # Remote is newer -> update local
+                                    self._upsert_file_record(local_conn, remote_file)
+                                    merged_count += 1
+                                else:
+                                    # Local is newer or equal -> keep local
+                                    kept_local += 1
+                                    if local_mtime > remote_mtime:
+                                        logger.info(
+                                            f"[SyncService] Keeping local newer version: {file_id} "
+                                            f"(local: {local_file.get('last_modified')}, "
+                                            f"remote: {remote_file.get('last_modified')})"
+                                        )
+                        
+                        local_conn.commit()
+                        local_conn.close()
+                        remote_conn.close()
+                        os.unlink(tmp_path)
+                        
+                        logger.info(
+                            f"[SyncService] Database merged: {new_from_remote} new from remote, "
+                            f"{merged_count} updated from remote, {kept_local} kept local"
+                        )
+                        return True
+                        
+                    except Exception as e:
+                        logger.error(f"[SyncService] Error merging databases: {e}")
+                        remote_conn.close()
+                        os.unlink(tmp_path)
+                        return False
                 else:
                     logger.error(f"[SyncService] Error getting DB: {response.status_code}")
                     
@@ -112,6 +194,51 @@ class SyncService:
             logger.error(f"[SyncService] Error syncing DB: {e}")
         
         return False
+    
+    def _parse_mtime(self, value) -> Optional[float]:
+        """Parse last_modified value to timestamp."""
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            dt = datetime.fromisoformat(str(value))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            return None
+    
+    def _upsert_file_record(self, conn: sqlite3.Connection, file_data: dict) -> None:
+        """Insert or update a file record in the database."""
+        sql = """
+        INSERT INTO files (file_id, name, path, size, last_modified, shard_id, 
+                          content_hash, version, origin_node, write_epoch)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(file_id) DO UPDATE SET
+            name = excluded.name,
+            path = excluded.path,
+            size = excluded.size,
+            last_modified = excluded.last_modified,
+            shard_id = excluded.shard_id,
+            content_hash = excluded.content_hash,
+            version = excluded.version,
+            origin_node = excluded.origin_node,
+            write_epoch = excluded.write_epoch
+        """
+        cursor = conn.cursor()
+        cursor.execute(sql, (
+            file_data["file_id"],
+            file_data["name"],
+            file_data["path"],
+            file_data["size"],
+            file_data["last_modified"],
+            file_data.get("shard_id"),
+            file_data.get("content_hash"),
+            file_data.get("version"),
+            file_data.get("origin_node"),
+            file_data.get("write_epoch"),
+        ))
     
     async def sync_files(self) -> Dict[str, int]:
         """
@@ -482,9 +609,124 @@ class SyncService:
         
         return {"downloaded": downloaded, "errors": errors, "missing": len(missing_files) if 'missing_files' in dir() else 0}
     
+    async def push_local_newer_files_to_primary(self) -> Dict[str, int]:
+        """
+        After split-brain recovery, push any local files that are newer than
+        what the PRIMARY has. This ensures LWW is correctly applied.
+        
+        This should be called after sync_database() to ensure our local DB
+        has the merged state, and we can identify which local files should
+        be pushed to PRIMARY.
+        """
+        if not self._primary_url:
+            return {"pushed": 0, "errors": 0}
+        
+        pushed = 0
+        errors = 0
+        
+        try:
+            async with httpx.AsyncClient(timeout=SYNC_TIMEOUT) as client:
+                # Get PRIMARY's file list with metadata
+                response = await client.get(f"{self._primary_url}/internal/files")
+                
+                if response.status_code != 200:
+                    logger.error(f"[SyncService] Error getting PRIMARY file list: {response.status_code}")
+                    return {"pushed": 0, "errors": 1}
+                
+                remote_files = {f["relative_path"]: f for f in response.json().get("files", [])}
+                
+                # Check local files
+                if not FILES_ROOT.exists():
+                    return {"pushed": 0, "errors": 0}
+                
+                for file_path in FILES_ROOT.rglob("*"):
+                    if not file_path.is_file():
+                        continue
+                    
+                    relative_path = file_path.relative_to(FILES_ROOT).as_posix()
+                    local_stat = file_path.stat()
+                    local_mtime = local_stat.st_mtime
+                    
+                    remote_file = remote_files.get(relative_path)
+                    
+                    should_push = False
+                    reason = ""
+                    
+                    if not remote_file:
+                        # File doesn't exist on PRIMARY
+                        should_push = True
+                        reason = "missing on PRIMARY"
+                    else:
+                        # Compare timestamps
+                        remote_mtime_str = remote_file.get("last_modified")
+                        if remote_mtime_str:
+                            try:
+                                remote_dt = datetime.fromisoformat(remote_mtime_str)
+                                if remote_dt.tzinfo is None:
+                                    remote_dt = remote_dt.replace(tzinfo=timezone.utc)
+                                remote_mtime = remote_dt.timestamp()
+                                
+                                # Local is newer by at least 1 second
+                                if local_mtime > remote_mtime + 1.0:
+                                    should_push = True
+                                    reason = f"local newer ({local_mtime:.0f} > {remote_mtime:.0f})"
+                            except Exception:
+                                pass
+                    
+                    if should_push:
+                        try:
+                            payload_mtime = datetime.fromtimestamp(local_mtime, tz=timezone.utc).isoformat()
+                            
+                            # Calculate content hash
+                            with open(file_path, "rb") as f:
+                                content = f.read()
+                                content_hash = hashlib.sha256(content).hexdigest()
+                            
+                            with open(file_path, "rb") as f:
+                                files = {"file": (file_path.name, f, "application/octet-stream")}
+                                data = {
+                                    "relative_path": relative_path,
+                                    "last_modified": payload_mtime,
+                                    "content_hash": content_hash,
+                                }
+                                push_resp = await client.post(
+                                    f"{self._primary_url}/internal/replicate-file",
+                                    files=files,
+                                    data=data,
+                                )
+                            
+                            if push_resp.status_code in (200, 201):
+                                pushed += 1
+                                logger.info(
+                                    f"[SyncService] Pushed local file to PRIMARY: {relative_path} ({reason})"
+                                )
+                            else:
+                                errors += 1
+                                logger.warning(
+                                    f"[SyncService] Error pushing {relative_path}: {push_resp.status_code}"
+                                )
+                        except Exception as e:
+                            errors += 1
+                            logger.error(f"[SyncService] Error pushing {relative_path}: {e}")
+                
+                if pushed > 0:
+                    logger.info(f"[SyncService] Post-sync push: {pushed} files pushed to PRIMARY")
+                    
+        except Exception as e:
+            logger.error(f"[SyncService] Error in push_local_newer_files_to_primary: {e}")
+            errors += 1
+        
+        return {"pushed": pushed, "errors": errors}
+    
     async def full_sync(self) -> bool:
         """
-        Perform a full sync (DB + files) and reconcile missing files.
+        Perform a full sync (DB merge + files + reconciliation).
+        
+        The sync process is designed to handle split-brain scenarios:
+        1. Merge database with LWW strategy (preserves local newer records)
+        2. Sync files bidirectionally (download newer from PRIMARY, push newer to PRIMARY)
+        3. Reconcile missing files from any available node
+        4. Final push of any remaining local newer files
         """
         if self._is_syncing:
             logger.debug("[SyncService] Sync already in progress")
@@ -497,12 +739,12 @@ class SyncService:
             start_time = datetime.now()
             logger.info(f"[SyncService] Starting full sync...")
             
-            # 1. Sync database
+            # 1. Merge database (LWW strategy, preserves local newer versions)
             db_ok = await self.sync_database()
             if not db_ok:
                 success = False
             
-            # 2. Sync files from PRIMARY
+            # 2. Sync files from PRIMARY (bidirectional with LWW)
             file_result = await self.sync_files()
             if file_result["errors"] > 0:
                 success = False
@@ -510,6 +752,10 @@ class SyncService:
             # 3. Reconcile any missing files (try ALL storage nodes)
             # This catches files that PRIMARY doesn't have but other nodes do
             reconcile_result = await self.reconcile_missing_files()
+            
+            # 4. Final pass: push any local files that are still newer than PRIMARY
+            # This handles edge cases where sync_files might have missed some
+            push_result = await self.push_local_newer_files_to_primary()
             
             # Update stats
             self._last_sync = datetime.now()
@@ -519,7 +765,8 @@ class SyncService:
             logger.info(
                 f"[SyncService] Sync #{self._sync_count} completed in {elapsed:.2f}s. "
                 f"DB: {'OK' if db_ok else 'FAIL'}, Files: {file_result['downloaded']} downloaded, "
-                f"{file_result['pushed']} pushed, {file_result['conflicts']} conflicts, "
+                f"{file_result['pushed'] + push_result['pushed']} pushed total, "
+                f"{file_result['conflicts']} conflicts, "
                 f"Reconciled: {reconcile_result['downloaded']} recovered"
             )
             
