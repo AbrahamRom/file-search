@@ -86,6 +86,14 @@ _cached_processors: List[Dict] = []
 _processors_cache_timestamp: float = 0
 _processors_cache_ttl: float = 15  # TTL del cache de processors en segundos
 
+# Cache de URLs de descarga validadas por processor
+# {processor_id: {"url": str, "timestamp": float, "is_localhost": bool}}
+_validated_download_urls: Dict[str, Dict] = {}
+_download_url_cache_ttl: float = 60  # TTL del cache de URLs validadas (1 minuto)
+
+# Timeout para validación de URLs (debe ser corto para no bloquear la UI)
+URL_VALIDATION_TIMEOUT: float = float(os.getenv("URL_VALIDATION_TIMEOUT", 2.0))
+
 
 def _discover_dns_urls() -> List[str]:
     """Descubre todas las URLs de DNS usando el alias de Docker (puede devolver varias IPs)."""
@@ -140,11 +148,12 @@ def _resolve_server_from_dns() -> Optional[str]:
 
 
 def _invalidate_server_cache():
-    """Invalida el cache del servidor para forzar re-resolución."""
-    global _cached_server_url, _cache_timestamp
+    """Invalida el cache del servidor y URLs de descarga para forzar re-resolución."""
+    global _cached_server_url, _cache_timestamp, _validated_download_urls
     _cached_server_url = None
     _cache_timestamp = 0
-    logger.info("Cache de servidor invalidado")
+    _validated_download_urls.clear()  # También invalidar URLs de descarga
+    logger.info("Cache de servidor y URLs de descarga invalidados")
 
 
 def _get_available_processors() -> List[Dict]:
@@ -257,13 +266,126 @@ def api_url(path: str) -> str:
     return urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
 
 
+def _validate_url_reachable(url: str, timeout: float = None) -> bool:
+    """
+    Valida si una URL es alcanzable haciendo una petición HEAD rápida.
+    
+    Args:
+        url: URL base del processor (sin el path del archivo)
+        timeout: Timeout en segundos para la validación
+    
+    Returns:
+        True si la URL es alcanzable, False en caso contrario
+    """
+    if timeout is None:
+        timeout = URL_VALIDATION_TIMEOUT
+    
+    try:
+        # Usar HEAD al endpoint /health para validación rápida
+        health_url = f"{url.rstrip('/')}/health"
+        response = requests.head(health_url, timeout=timeout, allow_redirects=True)
+        return response.status_code < 500  # 2xx, 3xx, 4xx son "alcanzables"
+    except (requests.ConnectionError, requests.Timeout) as e:
+        logger.debug(f"URL no alcanzable {url}: {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"Error inesperado validando URL {url}: {e}")
+        return False
+
+
+def _get_validated_processor_url(processor: Dict) -> str:
+    """
+    Obtiene una URL validada para un processor, con fallback a localhost.
+    
+    Primero intenta la URL externa (IP del host), si no es alcanzable
+    usa localhost como fallback. Los resultados se cachean para evitar
+    validaciones repetidas.
+    
+    Args:
+        processor: Diccionario con información del processor
+    
+    Returns:
+        URL base validada del processor
+    """
+    global _validated_download_urls
+    
+    processor_id = processor.get("processor_id", "unknown")
+    external_port = processor.get("external_port", processor.get("port", 8000))
+    
+    # Verificar cache
+    cached = _validated_download_urls.get(processor_id)
+    if cached and (time.time() - cached["timestamp"]) < _download_url_cache_ttl:
+        logger.debug(f"Usando URL cacheada para {processor_id}: {cached['url']}")
+        return cached["url"]
+    
+    # Construir URLs candidatas
+    primary_url = processor.get("external_url")
+    if not primary_url:
+        external_ip = processor.get("external_ip", "localhost")
+        primary_url = f"http://{external_ip}:{external_port}"
+    
+    localhost_url = f"http://localhost:{external_port}"
+    
+    # Si la URL primaria ya es localhost, no hay necesidad de validar
+    if "localhost" in primary_url or "127.0.0.1" in primary_url:
+        _validated_download_urls[processor_id] = {
+            "url": primary_url,
+            "timestamp": time.time(),
+            "is_localhost": True
+        }
+        return primary_url
+    
+    # Validar la URL primaria (IP externa)
+    logger.debug(f"Validando URL primaria para {processor_id}: {primary_url}")
+    if _validate_url_reachable(primary_url):
+        logger.info(f"URL primaria validada para {processor_id}: {primary_url}")
+        _validated_download_urls[processor_id] = {
+            "url": primary_url,
+            "timestamp": time.time(),
+            "is_localhost": False
+        }
+        return primary_url
+    
+    # Fallback a localhost
+    logger.warning(
+        f"URL primaria no alcanzable para {processor_id} ({primary_url}), "
+        f"usando fallback localhost: {localhost_url}"
+    )
+    _validated_download_urls[processor_id] = {
+        "url": localhost_url,
+        "timestamp": time.time(),
+        "is_localhost": True
+    }
+    return localhost_url
+
+
+def _invalidate_download_url_cache(processor_id: str = None):
+    """
+    Invalida el cache de URLs de descarga.
+    
+    Args:
+        processor_id: ID del processor a invalidar, o None para invalidar todo
+    """
+    global _validated_download_urls
+    
+    if processor_id:
+        _validated_download_urls.pop(processor_id, None)
+        logger.debug(f"Cache de URL de descarga invalidado para {processor_id}")
+    else:
+        _validated_download_urls.clear()
+        logger.debug("Cache de URLs de descarga invalidado completamente")
+
+
 def build_download_url(record: dict) -> str:
     """
-    Construye la URL de descarga para un archivo con descubrimiento automático.
+    Construye la URL de descarga para un archivo con validación automática.
     
-    Consulta al DNS para obtener processors disponibles y construye una URL
-    accesible desde el navegador del usuario. Esto permite que las descargas
-    funcionen en cualquier nodo del swarm sin hardcodear puertos.
+    Consulta al DNS para obtener processors disponibles, valida que la URL
+    sea alcanzable (probando la conexión), y usa localhost como fallback
+    si la IP externa no está disponible.
+    
+    Esto garantiza que las descargas funcionen incluso cuando un host pierde
+    su interfaz de red (ej: WiFi desconectado).
     
     Args:
         record: Diccionario con la información del archivo (debe contener 'file_id')
@@ -276,14 +398,22 @@ def build_download_url(record: dict) -> str:
         logger.warning(f"Registro sin file_id: {record}")
         return "#"
     
-    # Obtener processor disponible dinámicamente
-    processor_url = _get_processor_download_url()
-    if not processor_url:
-        logger.error("No se pudo obtener ningún processor para descarga")
-        return "#"
+    # Obtener processors disponibles
+    processors = _get_available_processors()
     
-    base_url = processor_url.rstrip("/")
-    return f"{base_url}/files/{file_id}/download"
+    if not processors:
+        # Fallback total: usar BROWSER_API_URL
+        logger.warning("No hay processors disponibles, usando BROWSER_API_URL como fallback")
+        return f"{BROWSER_API_URL.rstrip('/')}/files/{file_id}/download"
+    
+    # Seleccionar processor (round-robin simple con selección aleatoria)
+    import random
+    processor = random.choice(processors)
+    
+    # Obtener URL validada (con fallback automático a localhost si es necesario)
+    validated_url = _get_validated_processor_url(processor)
+    
+    return f"{validated_url.rstrip('/')}/files/{file_id}/download"
 
 
 
