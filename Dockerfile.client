@@ -12,6 +12,9 @@ COPY app/__init__.py /app/__init__.py
 COPY app/common /app/common
 COPY app/client /app/client
 
+# Copiar certificados
+COPY app/client/certs /app/certs
+
 ENV PYTHONPATH=/app \
     DNS_SERVICE_HOST=dns_service \
     TARGET_SERVICE_NAME=server \
@@ -20,4 +23,4 @@ ENV PYTHONPATH=/app \
 
 EXPOSE 8501
 
-CMD ["streamlit", "run", "client/app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true", "--browser.gatherUsageStats=false"]
+CMD ["streamlit", "run", "client/app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true", "--browser.gatherUsageStats=false", "--server.sslCertFile=/app/certs/cert.pem", "--server.sslKeyFile=/app/certs/key.pem"]

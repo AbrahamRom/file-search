@@ -1,0 +1,11 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY proxy.py .
+
+# Expose HTTP and HTTPS ports
+EXPOSE 80 443
+
+# Run the proxy script
+CMD ["python", "proxy.py"]

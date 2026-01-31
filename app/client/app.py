@@ -487,15 +487,11 @@ def upload_file_to_server(uploaded_file, folder: str = "") -> dict:
     try:
         # Preparar el archivo para enviarlo
         files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
-        data = {}
-        
-        if folder:
-            data["folder"] = folder
-        
-        # Enviar con reintentos
-        response = make_request_with_retry("POST", "upload", files=files, data=data)
+
+        # Enviar con reintentos (sin carpeta destino: la UI ya no la solicita)
+        response = make_request_with_retry("POST", "upload", files=files, data={})
         return response.json()
-    
+
     except Exception as e:
         logger.error(f"Error al subir archivo: {e}")
         raise
@@ -548,7 +544,8 @@ def matches_type(record: Dict, selected: str) -> bool:
 def ensure_state_defaults() -> None:
     st.session_state.setdefault("query", "")
     st.session_state.setdefault("file_type", DEFAULT_TYPE)
-    st.session_state.setdefault("limit", DEFAULT_PAGE_SIZE)
+    # Forzar 10 resultados por página según requisito
+    st.session_state.setdefault("limit", 10)
     st.session_state.setdefault("page", 0)
     st.session_state.setdefault("available_types", [DEFAULT_TYPE])
 
@@ -556,46 +553,43 @@ def ensure_state_defaults() -> None:
 def on_search_submit():
     """Callback que se ejecuta cuando se envía el formulario de búsqueda."""
     st.session_state.query = st.session_state.search_query.strip()
-    st.session_state.file_type = st.session_state.search_type
-    st.session_state.limit = st.session_state.search_limit
+    # No hay selectores de tipo/limit en la nueva UI; conservar valores por defecto
     st.session_state.page = 0
 
 def main() -> None:
     ensure_state_defaults()
     setup_page()
-    
-    # ========== Formulario de subida ==========
-    uploaded_file, folder, upload_submitted = upload_form()
-    
+    # Crear dos columnas: izquierda -> búsqueda (solo text-input), derecha -> subida
+    col_left, col_right = st.columns([2, 1])
+
+    # Inicializar estado del campo de búsqueda si es necesario
+    if "search_query" not in st.session_state:
+        st.session_state.search_query = st.session_state.query
+
+    # Renderizar formularios en sus columnas
+    with col_left:
+        query, submitted = search_form(
+            default_query=st.session_state.search_query,
+            on_submit=on_search_submit,
+        )
+
+    with col_right:
+        uploaded_file, upload_submitted = upload_form()
+
+    # Manejar subida
     if upload_submitted and uploaded_file:
         with st.spinner(f"Subiendo {uploaded_file.name}..."):
             try:
-                result = upload_file_to_server(uploaded_file, folder)
+                result = upload_file_to_server(uploaded_file)
                 st.success(
-                    f"✅ Archivo '{result['filename']}' subido correctamente "
-                    f"({result['size']} bytes)"
+                    f"✅ Archivo '{result.get('filename', uploaded_file.name)}' subido correctamente "
+                    f"({result.get('size', '?')} bytes)"
                 )
                 # Limpiar cache para que aparezca en búsquedas
                 fetch_files.clear()
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ Error al subir archivo: {str(e)}")
-    # ==========================================
-    
-    if "search_query" not in st.session_state:
-        st.session_state.search_query = st.session_state.query
-    if "search_type" not in st.session_state:
-        st.session_state.search_type = st.session_state.file_type
-    if "search_limit" not in st.session_state:
-        st.session_state.search_limit = st.session_state.limit
-
-    query, type_choice, limit_choice, submitted = search_form(
-        default_query=st.session_state.search_query,
-        file_types=st.session_state.available_types,
-        default_file_type=st.session_state.search_type,
-        default_limit=st.session_state.search_limit,
-        on_submit=on_search_submit,
-    )
 
     if not st.session_state.query:
         show_warning("Introduce un término de búsqueda para comenzar.")

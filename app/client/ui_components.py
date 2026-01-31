@@ -21,23 +21,19 @@ def setup_page() -> None:
 	st.set_page_config(page_title="File Search", layout="wide")
 	st.title("📁 Buscador de archivos")
 	st.caption(
-		"Explora, filtra y descarga los documentos disponibles en el repositorio compartido."
+		"Busca y descarga los documentos disponibles en el repositorio compartido."
 	)
 
 
 def search_form(
 	*,
 	default_query: str,
-	file_types: Iterable[str],
-	default_file_type: str,
-	default_limit: int,
 	on_submit=None,
-	limit_options: Iterable[int] = (10, 20, 50),
-) -> tuple[str, str, int, bool]:
-	"""Renderiza el formulario de búsqueda y devuelve los valores introducidos."""
+) -> tuple[str, bool]:
+	"""Renderiza un formulario de búsqueda simple (solo text-input).
 
-	options = list(file_types)
-	limits = list(limit_options)
+	Devuelve la query y si se pulsó buscar.
+	"""
 
 	with st.form("search_form", clear_on_submit=False):
 		st.text_input(
@@ -46,60 +42,31 @@ def search_form(
 			placeholder="Ej. reporte",
 			key="search_query"
 		)
-		col_type, col_limit = st.columns([2, 1])
-		with col_type:
-			st.selectbox(
-				"Tipo de archivo",
-				options=options,
-				index=max(0, options.index(default_file_type))
-				if default_file_type in options
-				else 0,
-				key="search_type"
-			)
-		with col_limit:
-			st.selectbox(
-				"Resultados por página",
-				options=limits,
-				index=limits.index(default_limit)
-				if default_limit in limits
-				else 0,
-				key="search_limit"
-			)
-
 		submitted = st.form_submit_button("Buscar", on_click=on_submit if on_submit else None)
 
-	# Para mantener compatibilidad con el código existente
 	query = st.session_state.get("search_query", default_query)
-	type_choice = st.session_state.get("search_type", default_file_type)
-	limit_choice = st.session_state.get("search_limit", default_limit)
-
-	return query, type_choice, limit_choice, submitted
+	return query, submitted
 
 
-def upload_form() -> tuple[Optional[object], Optional[str], bool]:
-	"""Renderiza el formulario de subida de archivos."""
-	
-	with st.expander("📤 Subir nuevo archivo", expanded=False):
-		with st.form("upload_form", clear_on_submit=True):
-			uploaded_file = st.file_uploader(
-				"Selecciona un archivo",
-				type=None,  # Permite cualquier tipo de archivo
-				help="Sube un archivo al repositorio compartido"
-			)
-			
-			folder = st.text_input(
-				"Carpeta destino (opcional)",
-				value="",
-				placeholder="Ej. documentos/2025",
-				help="Deja vacío para subir a la raíz"
-			)
-			
-			submitted = st.form_submit_button("Subir archivo", type="primary")
-			
-			if submitted and uploaded_file is not None:
-				return uploaded_file, folder.strip(), True
-	
-	return None, None, False
+def upload_form() -> tuple[Optional[object], bool]:
+	"""Renderiza el formulario de subida de archivos simplificado.
+
+	Solo muestra un file_uploader y el botón de subir. No solicita carpeta destino.
+	Devuelve (uploaded_file, submitted).
+	"""
+
+	with st.form("upload_form", clear_on_submit=True):
+		uploaded_file = st.file_uploader(
+			"Selecciona un archivo",
+			type=None,  # Permite cualquier tipo de archivo
+			help="Sube un archivo al repositorio compartido"
+		)
+		submitted = st.form_submit_button("Subir archivo", type="primary")
+
+		if submitted and uploaded_file is not None:
+			return uploaded_file, True
+
+	return None, False
 
 
 def render_results(
@@ -124,26 +91,23 @@ def render_results(
 		return
 
 	table = st.container()
-	headers = table.columns([3, 2, 2, 1])
+	# Mostrar solo Nombre | Modificado | Descargar (sin mostrar la ruta)
+	headers = table.columns([4, 2, 1])
 	headers[0].markdown("**Nombre**")
-	headers[1].markdown("**Ruta**")
-	headers[2].markdown(f"**Modificado ({timezone_label})**")
-	headers[3].markdown("**Descargar**")
+	headers[1].markdown(f"**Modificado ({timezone_label})**")
+	headers[2].markdown("**Descargar**")
 
 	for record in records:
-		cols = table.columns([3, 2, 2, 1])
-		cols[0].markdown(f"**{record['name']}**\n\n`{record['size']} bytes`")
-		cols[1].code(record["path"], language="text")
-		cols[2].markdown(str(record.get("last_modified", "-")))
-		
+		cols = table.columns([4, 2, 1])
+		cols[0].markdown(f"**{record['name']}**\n\n`{record.get('size', '?')} bytes`")
+		cols[1].markdown(str(record.get("last_modified", "-")))
+
 		# Construir URL de descarga
 		download_url = build_download_url(record)
 		file_name = record.get("name", "download")
-		
+
 		# Usar enlace HTML simple que abre en nueva pestaña
-		# El servidor envía Content-Disposition: attachment, por lo que el navegador
-		# descargará el archivo automáticamente
-		cols[3].markdown(
+		cols[2].markdown(
 			f'<a href="{download_url}" target="_blank" rel="noopener noreferrer" '
 			f'style="text-decoration: none; padding: 4px 8px; background-color: #f0f2f6; '
 			f'border-radius: 4px; display: inline-block;">⬇️ Descargar</a>',
