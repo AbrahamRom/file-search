@@ -39,6 +39,17 @@ docker run -d \
   file-search-storage:latest
   
 docker run -d \
+  --name storage_2 \
+  --hostname storage_2 \
+  --network file_search_net \
+  --network-alias storage \
+  -p 9001:8000 \
+  -v /srv/file-search/files:/tmp/source_files:ro \
+  -v /srv/file-search/logs:/app/logs \
+  -e STORAGE_ID=storage_2 \
+  file-search-storage:latest
+
+docker run -d \
   --name processor_1 \
   --hostname processor_1 \
   --network file_search_net \
@@ -49,7 +60,31 @@ docker run -d \
   -e PROCESSOR_EXTERNAL_PORT=8000 \
   -e PROCESSOR_EXTERNAL_IP=192.168.202.12 \
   file-search-processor:latest
-  
+
+docker run -d \
+  --name processor_2 \
+  --hostname processor_2 \
+  --network file_search_net \
+  --network-alias processor \
+  -p 8001:8000 \
+  -v /srv/file-search/logs:/app/logs \
+  -e PROCESSOR_ID=processor_2 \
+  -e PROCESSOR_EXTERNAL_PORT=8001 \
+  -e PROCESSOR_EXTERNAL_IP=192.168.202.12 \
+  file-search-processor:latest
+
+docker run -d \
+  --name processor_3 \
+  --hostname processor_3 \
+  --network file_search_net \
+  --network-alias processor \
+  -p 8002:8000 \
+  -v /srv/file-search/logs:/app/logs \
+  -e PROCESSOR_ID=processor_3 \
+  -e PROCESSOR_EXTERNAL_PORT=8002 \
+  -e PROCESSOR_EXTERNAL_IP=192.168.202.12 \
+  file-search-processor:latest
+
 docker run -d \
   --name client_1 \
   --hostname client_1 \

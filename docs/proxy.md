@@ -125,17 +125,9 @@ CMD ["python", "proxy.py"]
 docker build -t file-search-proxy -f Dockerfile.proxy .
 
 docker run -d \
-  --name custom_proxy \
+  --name proxy \
   --network file_search_net \
   -p 80:80 -p 443:443 \
   -v /srv/file-search/nginx/certs:/etc/nginx/certs:ro \
   file-search-proxy
 ```
-
-## 4) Pruebas
-- Navegador: `https://client.file-search.local`
-- API: `https://api.file-search.local` (debe responder vía proxy).
-
-## 5) Solución de problemas
-- Revisa logs del proxy: `docker logs custom_proxy`
-- Verifica conectividad: `docker exec custom_proxy ping client_2`

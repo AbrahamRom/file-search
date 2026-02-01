@@ -12,11 +12,11 @@ import os
 def get_config():
     env_config = os.environ.get("PROXY_CONFIG", "")
     if not env_config:
-        # Valores por defecto si no se proporciona la variable
+        # Valores por defecto que coinciden con docker-compose.separated.yml
         return {
-            "client.file-search.local": "client_1:8501",
-            "api.file-search.local": "processor_1:8000",
-            "192.168.202.12": "client_1:8501"
+            "client.file-search.local": "client:8501",
+            "api.file-search.local": "processor:8000",
+            "192.168.202.12": "client:8501"
         }
     
     config_map = {}

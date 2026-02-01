@@ -91,11 +91,18 @@ def get_cors_config() -> dict:
         "http://127.0.0.1:8000",
         # Docker interno
         "http://client:8501",
+        "http://processor:8000",
         "http://processor_1:8000",
         "http://processor_2:8000",
+        "http://storage:8000",
         "http://storage_1:8000",
         "http://storage_2:8000",
         "http://storage_3:8000",
+        # Proxy domains
+        "https://client.file-search.local",
+        "https://api.file-search.local",
+        "http://client.file-search.local",
+        "http://api.file-search.local",
     ]
     
     # ═══════════════════════════════════════════════════════════════════

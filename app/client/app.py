@@ -95,13 +95,41 @@ _download_url_cache_ttl: float = 60  # TTL del cache de URLs validadas (1 minuto
 URL_VALIDATION_TIMEOUT: float = float(os.getenv("URL_VALIDATION_TIMEOUT", 2.0))
 
 
+def _get_protocol() -> str:
+    """
+    Retorna el protocolo (http o https) basado en BROWSER_API_URL o headers.
+    """
+    try:
+        ctx = getattr(st, "context", None)
+        if ctx and hasattr(ctx, "headers"):
+            # 1. Check X-Forwarded-Proto
+            proto = ctx.headers.get("x-forwarded-proto", "").lower()
+            if proto == "https":
+                return "https"
+            # 2. Check referer
+            referer = ctx.headers.get("referer", "")
+            if referer.startswith("https"):
+                return "https"
+            # 3. Check origin
+            origin = ctx.headers.get("origin", "")
+            if origin.startswith("https"):
+                return "https"
+    except Exception:
+        pass
+
+    if BROWSER_API_URL.startswith("https") or ".local" in BROWSER_API_URL:
+        return "https"
+    return "http"
+
+
 def _discover_dns_urls() -> List[str]:
     """Descubre todas las URLs de DNS usando el alias de Docker (puede devolver varias IPs)."""
     import socket
+    protocol = "http" # El DNS siempre es interno en HTTP en este proyecto
     try:
         results = socket.getaddrinfo(DNS_ALIAS, DNS_SERVICE_PORT, socket.AF_INET, socket.SOCK_STREAM)
         ips = sorted(set(result[4][0] for result in results))  # Ordenar para consistencia
-        return [f"http://{ip}:{DNS_SERVICE_PORT}" for ip in ips]
+        return [f"{protocol}://{ip}:{DNS_SERVICE_PORT}" for ip in ips]
     except Exception as e:
         logger.warning(f"Error descubriendo DNS: {e}")
     return []
@@ -111,9 +139,20 @@ def _resolve_server_from_dns() -> Optional[str]:
     """
     Pregunta al DNS por un Processor Node disponible.
     Usa el endpoint /processor/resolve.
+    
+    Si BROWSER_API_URL apunta al proxy (api.file-search.local), 
+    se prioriza el uso del proxy para mantener la alta disponibilidad
+    aunque un nodo individual falle.
     """
     global _cached_server_url, _cache_timestamp
     
+    # Prioridad: Si el cliente está configurado para usar el proxy, usarlo.
+    if "api.file-search.local" in BROWSER_API_URL:
+        # En la red interna de Docker, el proxy se llama 'proxy' o 'processor' (alias)
+        # Pero aquí devolvemos el alias de red 'processor' para que el cliente
+        # dentro de Docker hable con el balanceador de carga de Docker.
+        return f"http://processor:8000"
+
     # Verificar cache
     if _cached_server_url and (time.time() - _cache_timestamp) < _cache_ttl:
         return _cached_server_url
@@ -211,7 +250,7 @@ def _map_processor_to_browser_url(processor_ip: str, processor_port: int) -> str
     Returns:
         URL accesible desde el navegador (localhost:PUERTO_EXPUESTO)
     """
-    return f"http://localhost:{processor_port}"
+    return f"{_get_protocol()}://localhost:{processor_port}"
 
 
 def _get_processor_download_url() -> Optional[str]:
@@ -239,7 +278,7 @@ def _get_processor_download_url() -> Optional[str]:
     if not processor_url:
         # Fallback: construir URL usando el puerto externo o interno
         external_port = processor.get("external_port", processor.get("port", 8000))
-        processor_url = f"http://localhost:{external_port}"
+        processor_url = f"{_get_protocol()}://localhost:{external_port}"
     
     logger.debug(f"Processor seleccionado para descarga: {processor['processor_id']} -> {processor_url}")
     return processor_url
@@ -256,7 +295,7 @@ def get_api_base_url() -> str:
         return server_url
     
     # Fallback: Usar variable de entorno o localhost
-    fallback = os.getenv("API_BASE_URL", "http://localhost:8000")
+    fallback = os.getenv("API_BASE_URL", f"{_get_protocol()}://localhost:8000")
     logger.warning(f"Usando URL de fallback: {fallback}")
     return fallback
 
@@ -319,12 +358,17 @@ def _get_validated_processor_url(processor: Dict) -> str:
         return cached["url"]
     
     # Construir URLs candidatas
+    protocol = _get_protocol()
     primary_url = processor.get("external_url")
-    if not primary_url:
+    if primary_url:
+        # Asegurar que el protocolo coincida con el deseado si es una URL del proxy
+        if ".local" in primary_url and not primary_url.startswith(protocol):
+            primary_url = primary_url.replace("http://", "https://")
+    else:
         external_ip = processor.get("external_ip", "localhost")
-        primary_url = f"http://{external_ip}:{external_port}"
+        primary_url = f"{protocol}://{external_ip}:{external_port}"
     
-    localhost_url = f"http://localhost:{external_port}"
+    localhost_url = f"{protocol}://localhost:{external_port}"
     
     # Si la URL primaria ya es localhost, no hay necesidad de validar
     if "localhost" in primary_url or "127.0.0.1" in primary_url:
@@ -379,26 +423,37 @@ def _invalidate_download_url_cache(processor_id: str = None):
 def build_download_url(record: dict) -> str:
     """
     Construye la URL de descarga para un archivo con validación automática.
-    
-    Consulta al DNS para obtener processors disponibles, valida que la URL
-    sea alcanzable (probando la conexión), y usa localhost como fallback
-    si la IP externa no está disponible.
-    
-    Esto garantiza que las descargas funcionen incluso cuando un host pierde
-    su interfaz de red (ej: WiFi desconectado).
-    
-    Args:
-        record: Diccionario con la información del archivo (debe contener 'file_id')
-    
-    Returns:
-        URL completa para descargar el archivo
     """
     file_id = record.get("file_id", "")
     if not file_id:
-        logger.warning(f"Registro sin file_id: {record}")
         return "#"
     
-    # Obtener processors disponibles
+    # Determinar protocolo actual de la página
+    current_proto = _get_protocol()
+    force_https = (current_proto == "https")
+    
+    # Detectar si estamos accediendo via dominio .local
+    try:
+        ctx = getattr(st, "context", None)
+        if ctx and hasattr(ctx, "headers"):
+            current_host = ctx.headers.get("host", "")
+            if ".local" in current_host:
+                force_https = True
+    except Exception:
+        pass
+
+    # Si la página está en HTTPS, la descarga DEBE ser HTTPS
+    if force_https:
+        # Si BROWSER_API_URL es una IP, no servirá para HTTPS (error de certificado)
+        # Debemos usar el dominio del proxy que sí tiene el certificado
+        url = BROWSER_API_URL.rstrip('/')
+        if not any(d in url for d in ["api.file-search.local", "client.file-search.local"]) or url.startswith("http://"):
+             # Forzar dominio seguro del proxy
+             url = "https://api.file-search.local"
+        
+        return f"{url}/files/{file_id}/download"
+    
+    # Fallback a processors individuales si estamos en HTTP (desarrollo local)
     processors = _get_available_processors()
     
     if not processors:

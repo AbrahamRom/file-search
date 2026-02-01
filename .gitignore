@@ -9,3 +9,4 @@ app/server/db/doc_search.db
 env
 .bash
 entregas.md
+*.pem
