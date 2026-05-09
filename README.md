@@ -1,252 +1,202 @@
 # File Search
 
-Plataforma compuesta por un backend FastAPI y un cliente web en Streamlit para localizar, filtrar y descargar archivos alojados en un volumen compartido.
+A platform composed of a FastAPI backend and a Streamlit web client to locate, filter, upload, and download files hosted on a shared volume.
 
-## 🎯 Características principales
+## 🎯 Key Features
 
-- Escaneo recurrente del directorio configurado (por defecto `/app/files`) con sincronización automática en SQLite.
-- API REST con endpoints de salud, búsqueda paginada, consulta y descarga de archivos.
-- Cliente Streamlit con búsqueda por nombre, filtro por tipo, paginación y enlaces de descarga.
-- Sistema de logging unificado (aplicación y access logs) escribiendo en `/app/logs`.
-- **Arquitectura DNS de Alta Disponibilidad** con servidor primario, dos backups y proxy con failover automático.
-- Imágenes Docker separadas para la API (`Dockerfile.server`) y el cliente (`Dockerfile.client`) listas para ejecutarse en redes Swarm o entornos distribuidos.
+- **Automated Synchronization:** Background scanning of the configured directory (default `/app/files`) with automatic synchronization to an SQLite database.
+- **REST API:** Endpoints for health checks, paginated search, file uploads, metadata queries, and file downloads.
+- **Streamlit Web Client:** Intuitive interface featuring search by name, filtering by type, pagination, and direct download links.
+- **Unified Logging:** Centralized application and access logs writing to `/app/logs`.
+- **Highly Available DNS Architecture:** Includes a primary server, two backup servers, and an intelligent proxy with automatic failover.
+- **Containerized Environment:** Separate Docker images for the API (`Dockerfile.server`), the client (`Dockerfile.client`), and DNS components, ready for Docker Swarm or distributed deployments.
 
-## 🌐 Arquitectura DNS de Alta Disponibilidad
+## 🌐 High Availability DNS Architecture
 
-El sistema incluye una arquitectura robusta de DNS con alta disponibilidad:
+The system includes a robust, highly available DNS architecture:
 
-### Componentes
+### Components
 
-1. **DNS Proxy** (`dns_proxy` - Puerto 5350)
-   - Punto de entrada único para todas las solicitudes DNS
-   - Failover automático entre servidores
-   - Health checks periódicos de todos los servidores DNS
-   - Enrutamiento inteligente hacia servidores saludables
+1. **DNS Proxy** (`dns_proxy` - Port 5350)
+   - Single entry point for all DNS requests.
+   - Automatic failover between servers.
+   - Periodic health checks of all DNS servers.
+   - Smart routing to healthy servers.
 
-2. **DNS Primario** (`dns_primary` - Puerto 5353)
-   - Servidor DNS principal que maneja resoluciones
-   - Propaga actualizaciones a servidores backup
-   - Cache de resoluciones DNS
-   - Logging completo de todas las operaciones
+2. **Primary DNS** (`dns_primary` - Port 5353)
+   - Main DNS server handling resolutions.
+   - Propagates updates to backup servers.
+   - DNS resolution caching.
+   - Comprehensive logging of all operations.
 
-3. **DNS Backup 1** (`dns_backup_1` - Puerto 5354)
-   - Servidor de respaldo que sincroniza con el primario
-   - Sincronización periódica cada 30 segundos
-   - Toma el control automáticamente si el primario falla
-   - Mantiene cache sincronizado
+3. **DNS Backup 1** (`dns_backup_1` - Port 5354)
+   - Backup server that synchronizes with the primary.
+   - Periodic synchronization every 30 seconds.
+   - Automatically takes control if the primary fails.
+   - Maintains a synchronized cache.
 
-4. **DNS Backup 2** (`dns_backup_2` - Puerto 5355)
-   - Segundo servidor de respaldo independiente
-   - Proporciona redundancia adicional
-   - Sincronización automática con el primario
-   - Failover de tercer nivel
+4. **DNS Backup 2** (`dns_backup_2` - Port 5355)
+   - Independent second-level backup server.
+   - Provides additional redundancy.
+   - Automatic synchronization with the primary.
+   - Third-level failover.
 
-### Características de Alta Disponibilidad
+### High Availability Features
 
-- **Replicación automática**: Los servidores backup se sincronizan automáticamente con el primario cada 30 segundos
-- **Failover transparente**: El proxy detecta fallos y redirige el tráfico sin intervención manual
-- **Health monitoring**: Verificación continua del estado de todos los servidores cada 10 segundos
-- **Cache distribuido**: Cada servidor mantiene su propio cache para respuestas rápidas
-- **Logging exhaustivo**: Todas las operaciones se registran con identificadores de servidor
-- **Recuperación automática**: Servidores caídos se reintegran automáticamente al recuperarse
+- **Automatic Replication:** Backup servers automatically sync with the primary every 30 seconds.
+- **Transparent Failover:** The proxy detects failures and redirects traffic without manual intervention.
+- **Health Monitoring:** Continuous health checks of all servers every 10 seconds.
+- **Distributed Cache:** Each server maintains its own cache for rapid responses.
+- **Comprehensive Logging:** All operations are recorded with server identifiers.
+- **Automatic Recovery:** Downed servers automatically reintegrate upon recovery.
 
-### Flujo de Operación
+### Operational Flow
 
-1. Cliente solicita resolución DNS al proxy (puerto 5350)
-2. Proxy intenta resolver con el servidor primario
-3. Si el primario falla, proxy intenta con backup_1
-4. Si backup_1 falla, proxy intenta con backup_2
-5. Servidores backup sincronizan su cache con el primario cada 30 segundos
-6. Health checks actualizan el estado de disponibilidad cada 10 segundos
+1. Client requests DNS resolution from the proxy (port 5350).
+2. Proxy attempts to resolve with the primary server.
+3. If primary fails, proxy tries backup_1.
+4. If backup_1 fails, proxy tries backup_2.
+5. Backup servers sync their cache with the primary every 30 seconds.
+6. Health checks update the availability status every 10 seconds.
 
-## 📂 Estructura relevante
+## 📂 Project Structure
 
 ```text
 app/
-├── main.py              # Punto de entrada (configura logs y expone la app FastAPI)
+├── main.py              # Entry point (configures logs and exposes the FastAPI app)
 ├── dns_service/
-│   ├── main.py          # Servidor DNS con sincronización y cache
-│   ├── proxy.py         # Proxy DNS con failover automático
-│   ├── logging_config.py# Configuración de logs DNS
-│   ├── Dockerfile       # Imagen para servidores DNS
-│   └── Dockerfile.proxy # Imagen para proxy DNS
+│   ├── main.py          # DNS server with sync and caching
+│   ├── proxy.py         # DNS Proxy with automatic failover
+│   ├── logging_config.py# DNS logging configuration
+│   ├── Dockerfile       # Image for DNS servers
+│   └── Dockerfile.proxy # Image for DNS proxy
 ├── server/
-│   ├── api/endpoints.py # Endpoints de la API
-│   ├── logging_config.py# Configuración centralizada de logging
+│   ├── api/endpoints.py # API Endpoints
+│   ├── logging_config.py# Centralized logging configuration
 │   ├── db/
-│   │   ├── db.py        # Inicialización de SQLite
-│   │   └── crud.py      # Operaciones sobre la tabla files
+│   │   ├── db.py        # SQLite initialization
+│   │   └── crud.py      # Operations on the files table
 │   └── services/
-│       ├── scanner.py   # Escaneo de archivos y sincronización
+│       ├── scanner.py   # File scanning and synchronization
 │       └── file_handler.py
 ├── client/
-│   ├── app.py           # Interfaz Streamlit
-│   └── ui_components.py # Componentes reutilizables de UI
-├── files/               # Ejemplos para pruebas locales (monta tu propio volumen en producción)
-└── logs/                # Carpeta objetivo para logs (se recomienda montarla como volumen)
+│   ├── app.py           # Streamlit interface
+│   └── ui_components.py # Reusable UI components
+├── files/               # Examples for local testing (mount your own volume in production)
+└── logs/                # Target folder for logs (mounting a volume is recommended)
 ```
 
-## 🚀 Puesta en marcha rápida (Docker)
+## 🚀 Quick Start
 
-docker build -f Dockerfile.server -t file-search-api .
+### Using Docker Compose (Recommended)
 
-docker run --rm -p 8000:8000 -v "${PWD}/runtime/files:/app/files" -v "${PWD}/runtime/logs:/app/logs" file-search-api
+The high availability DNS architecture and the application stack are deployed automatically with Docker Compose.
 
-docker build -f Dockerfile.client -t file-search-client .
+**1. Set Environment Variables:**
+Choose the directory you want to share and optionally define the internal container path.
 
-docker run --rm -p 8501:8501 -e API_BASE_URL=http://host.docker.internal:8000 file-search-client
-
-### Puesta en marcha con Docker Compose
-
-La arquitectura de alta disponibilidad DNS se despliega automáticamente con Docker Compose:
-
+*For Linux/macOS (Bash):*
 ```bash
-# 1. Elige la carpeta de archivos que deseas compartir (por ejemplo /home/usuario/documentos)
-export FILES_SOURCE=/home/usuario/documentos
-
-# 2. (Opcional) Cambia la ruta interna del contenedor donde se indexarán los archivos
+export FILES_SOURCE=/path/to/your/documents
 export FILES_ROOT=/app/files
+```
 
-# 3. Inicia todos los servicios (incluye DNS Proxy + Primary + 2 Backups)
+*For Windows (PowerShell):*
+```powershell
+$env:FILES_SOURCE="D:\Library"
+$env:FILES_ROOT="/app/files"
+```
+*(Note: If `FILES_SOURCE` is not defined, it defaults to `./runtime/files`)*
+
+**2. Build and Start Services:**
+```bash
 docker compose up --build
 ```
 
-Los siguientes servicios estarán disponibles:
+**Available Services:**
+- **DNS Proxy:** `http://localhost:5350`
+- **Primary DNS:** `http://localhost:5353`
+- **DNS Backup 1:** `http://localhost:5354`
+- **DNS Backup 2:** `http://localhost:5355`
+- **API:** `http://localhost:8000` (Docs at `/docs`)
+- **Web Client:** `http://localhost:8501`
 
-- **DNS Proxy**: `http://localhost:5350` - Punto de entrada con failover
-- **DNS Primario**: `http://localhost:5353` - Servidor principal
-- **DNS Backup 1**: `http://localhost:5354` - Primera réplica
-- **DNS Backup 2**: `http://localhost:5355` - Segunda réplica
-- **API**: `http://localhost:8000` - API de archivos
-- **Cliente Web**: `http://localhost:8501` - Interfaz Streamlit
-
-### Verificar estado de DNS
+### Verifying DNS Status
 
 ```bash
-# Estado del proxy y servidores
+# Proxy and overall server status
 curl http://localhost:5350/health
 
-# Estado del servidor primario
+# Primary server status
 curl http://localhost:5353/health
 
-# Estado de los backups
+# Backup servers status
 curl http://localhost:5354/health
 curl http://localhost:5355/health
 ```
 
-### Probar resolución DNS
+## 🗃️ File Management & API Endpoints
+
+The project uses a folder as its primary data source. Files placed in the configured `files` directory are automatically scanned and registered in the database.
+
+### Uploading Files via API
+
+You can programmatically upload files using the upload endpoint:
 
 ```bash
-# Resolver un hostname a través del proxy
-curl http://localhost:5350/resolve/server
-
-# Resolver directamente desde el primario
-curl http://localhost:5353/resolve/client
+curl -X POST -F "file=@document.pdf" -F "folder=optional_subfolder" http://localhost:8000/upload
 ```
 
----
-
-## Funcionalidad de Archivos
-
-El proyecto incluye una funcionalidad para usar una carpeta de archivos como base de datos:
-
-- La carpeta `files` se utiliza para almacenar los archivos subidos
-- Los archivos se cargan automáticamente y se registran en la base de datos
-- Se puede acceder a los archivos a través de la API
-
-### Cómo subir archivos
-
-Para subir un archivo, utiliza el endpoint `/upload`:
-
-```
-POST /upload
-```
-
-Parámetros:
-- `file`: El archivo a subir (multipart/form-data)
-- `folder`: (Opcional) Subcarpeta donde guardar el archivo
-
-Ejemplo de respuesta:
+**Example Response:**
 ```json
 {
   "status": "success",
   "file_id": "7f8e9d1c2b3a4f5e6d7c8b9a",
-  "filename": "documento.pdf",
+  "filename": "document.pdf",
   "size": 12345
 }
 ```
 
-Los archivos subidos estarán disponibles para búsqueda y descarga a través de los endpoints existentes.
+### Main API Endpoints
 
-```bash
-# 1. Elige la carpeta de archivos que deseas compartir (por ejemplo D:\MisDocumentos)
-$env:FILES_SOURCE = "D:\Library"
-
-# 2. (Opcional) Cambia la ruta interna del contenedor donde se indexarán los archivos
-$env:FILES_ROOT = "/app/files"
-
-# 3. Inicia ambos servicios
-docker compose up --build
-```
-
-Por defecto, si no defines `FILES_SOURCE`, se usará `./runtime/files`.
-
-- La API estará disponible en `http://localhost:8000` (documentación en `/docs`).
-- El cliente Streamlit estará en `http://localhost:8501`.
-- Puedes ajustar `API_BASE_URL` en el cliente si la API está en otra dirección.
-
-Ejemplo para cambiar la carpeta de archivos:
-
-```bash
-FILES_SOURCE=/home/usuario/documentos docker compose up --build
-```
-
-Esto montará `/home/usuario/documentos` en el contenedor y la API indexará esos archivos.
-
-## 🧾 Endpoints principales
-
-| Método | Ruta                         | Descripción                               |
+| Method | Path                         | Description                               |
 |--------|------------------------------|-------------------------------------------|
-| GET    | `/health`                    | Verifica el estado del servicio.          |
-| GET    | `/search?query&limit&offset` | Búsqueda paginada de archivos.            |
-| GET    | `/files/{file_id}`           | Obtiene metadatos completos del archivo.  |
-| GET    | `/files/{file_id}/download`  | Descarga el archivo.                      |
-| POST   | `/files`                     | Registra o actualiza un archivo.          |
-| DELETE | `/files/{file_id}`           | Elimina un registro existente.            |
+| GET    | `/health`                    | Checks service health status.             |
+| GET    | `/search?query&limit&offset` | Paginated file search.                    |
+| GET    | `/files/{file_id}`           | Retrieves full file metadata.             |
+| GET    | `/files/{file_id}/download`  | Downloads the specified file.             |
+| POST   | `/files` / `/upload`         | Uploads or updates a file.                |
+| DELETE | `/files/{file_id}`           | Deletes an existing file record.          |
 
-La documentación automática de FastAPI está disponible en `http://API_HOST:8000/docs`.
+*Interactive documentation is automatically generated by FastAPI and available at `http://localhost:8000/docs`.*
 
-## 🗃️ Logging
+## 🧾 Logging
 
-- Los logs se guardan en `/app/logs` (`application.log` y `access.log`).
-- Cambia el destino o niveles con `LOG_DIR`, `LOG_LEVEL` y `ACCESS_LOG_LEVEL`.
-- Monta un volumen en `/app/logs` para persistirlos en producción.
+- Logs are stored in `/app/logs` (`application.log` and `access.log`).
+- Modify the destination or logging levels using the `LOG_DIR`, `LOG_LEVEL`, and `ACCESS_LOG_LEVEL` environment variables.
+- Mount a volume to `/app/logs` to persist logs in a production environment.
 
-## Desarrollo local (opcional)
+## 🛠️ Local Development (Optional)
 
 ```bash
 pip install -r app/server/requirements.txt
 FILES_ROOT=./app/files bash app/start.sh
 ```
+The `app/files` directory in the repository contains examples for quick local testing. For real-world usage, point `FILES_ROOT` to the directory you wish to index.
 
-El directorio `app/files` del repositorio contiene ejemplos para pruebas locales rápidas; en entornos reales apunta `FILES_ROOT` a la ruta que quieras indexar.
-
-## 🧪 Pruebas rápidas
+## 🧪 Testing
 
 ```bash
 PYTHONPATH=$(pwd) python3 -m pytest tests
 ```
 
-Si aún no cuentas con tests implementados, puedes usar el `TestClient` de FastAPI para validar manualmente:
-
+To manually validate endpoints using the FastAPI `TestClient` (if you haven't written tests yet):
 ```bash
 PYTHONPATH=$(pwd) python3 -c "from fastapi.testclient import TestClient; from app.server.api.endpoints import app; client = TestClient(app); print(client.get('/health').json())"
 ```
 
-## 📌 Notas adicionales
+## 📌 Additional Notes
 
-- Al construir la imagen del servidor no se empaquetan archivos de datos; monta la carpeta deseada en `/app/files` en runtime.
-- Para despliegues en Swarm o Kubernetes declara volúmenes/claims para `/app/files` y `/app/logs`, y expone la variable `API_BASE_URL` en el cliente para alcanzar la API.
-- Ajusta `DB_PATH` si quieres que la base SQLite viva fuera del contenedor.
-
----
+- When building the server image, data files are not packaged. You must mount the desired folder to `/app/files` at runtime.
+- For Docker Swarm or Kubernetes deployments, declare volumes/claims for `/app/files` and `/app/logs`, and expose the `API_BASE_URL` variable in the client so it can successfully reach the API.
+- Adjust `DB_PATH` if you want the SQLite database to persist outside the container.
